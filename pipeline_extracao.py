@@ -11,7 +11,6 @@ import json
 import logging
 import os
 import sys
-import time
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -111,54 +110,26 @@ def _configurar_gemini() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Gemini File API
+# Extração estruturada (PDF inline — sem File API)
 # ---------------------------------------------------------------------------
 
 
-def _fazer_upload_pdf(caminho_pdf: str):
+def _extrair_dados_gemini(caminho_pdf: str) -> dict:
     """
-    Envia o PDF para a File API do Gemini e aguarda o processamento.
+    Lê o PDF localmente e envia inline para o gemini-2.5-flash-lite.
 
-    O polling tem timeout de 60 s — suficiente para PDFs de até ~50 MB.
+    Evita a File API (que exige permissões adicionais na chave).
+    Limite prático: PDFs até ~20 MB.
     """
-    logger.info("Enviando PDF para a File API do Gemini: '%s'...", caminho_pdf)
-    arquivo = genai.upload_file(path=caminho_pdf, mime_type="application/pdf")
-    logger.info(
-        "Upload concluído (name='%s'). Aguardando processamento...", arquivo.name
-    )
+    logger.info("Lendo PDF para envio inline ao Gemini: '%s'...", caminho_pdf)
+    pdf_bytes = Path(caminho_pdf).read_bytes()
+    tamanho_mb = len(pdf_bytes) / 1_048_576
+    logger.info("PDF carregado (%.1f MB). Solicitando extração estruturada...", tamanho_mb)
 
-    tentativas = 0
-    max_tentativas = 30  # 30 × 2 s = 60 s
-    while arquivo.state.name == "PROCESSING":
-        if tentativas >= max_tentativas:
-            raise TimeoutError(
-                f"Arquivo '{arquivo.name}' não ficou pronto após {max_tentativas * 2}s."
-            )
-        time.sleep(2)
-        arquivo = genai.get_file(arquivo.name)
-        tentativas += 1
-
-    if arquivo.state.name == "FAILED":
-        raise RuntimeError(
-            f"Processamento do arquivo '{arquivo.name}' falhou no servidor Gemini."
-        )
-
-    logger.info("Arquivo pronto para uso (state='%s').", arquivo.state.name)
-    return arquivo
-
-
-# ---------------------------------------------------------------------------
-# Extração estruturada
-# ---------------------------------------------------------------------------
-
-
-def _extrair_dados_gemini(arquivo_gemini) -> dict:
-    """Chama gemini-1.5-pro e retorna o dict extraído do PDF."""
-    logger.info("Solicitando extração estruturada ao modelo gemini-1.5-pro...")
     model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
     resposta = model.generate_content(
-        [arquivo_gemini, PROMPT_EXTRACAO],
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, PROMPT_EXTRACAO],
         generation_config=genai.GenerationConfig(
             response_mime_type="application/json",
             temperature=0.0,  # máximo determinismo para extração factual
@@ -327,11 +298,10 @@ def executar_pipeline(codigo_if: str) -> None:
     _configurar_gemini()
 
     caminho_pdf: str | None = None
-    arquivo_gemini = None
 
     try:
         # ── Etapa 1: Localização e download ─────────────────────────────────
-        logger.info("[1/5] Localizando PDF no Google Drive...")
+        logger.info("[1/4] Localizando PDF no Google Drive...")
         drive_service = obter_servico()
         file_id = encontrar_termo_por_codigo_if(drive_service, codigo_if)
 
@@ -345,20 +315,14 @@ def executar_pipeline(codigo_if: str) -> None:
 
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         caminho_pdf = baixar_pdf_drive(drive_service, file_id, str(TEMP_DIR))
-        logger.info("[1/5] PDF disponível em: '%s'.", caminho_pdf)
+        logger.info("[1/4] PDF disponível em: '%s'.", caminho_pdf)
 
-        # ── Etapa 2: Upload para a File API do Gemini ────────────────────────
-        logger.info("[2/5] Fazendo upload para a File API do Gemini...")
-        arquivo_gemini = _fazer_upload_pdf(caminho_pdf)
+        # ── Etapa 2: Extração estruturada (PDF inline) ───────────────────────
+        logger.info("[2/4] Extraindo dados estruturados com gemini-2.5-flash-lite...")
+        dados = _extrair_dados_gemini(caminho_pdf)
 
-        # ── Etapa 3: Extração estruturada ────────────────────────────────────
-        logger.info("[3/5] Extraindo dados estruturados com gemini-1.5-pro...")
-        dados = _extrair_dados_gemini(arquivo_gemini)
-
-        # ── Etapas 4 + 5: Embeddings + persistência ──────────────────────────
-        # Os embeddings são gerados dentro de _persistir_dados, por cláusula,
-        # para evitar carregar todos em memória antes de abrir a transação.
-        logger.info("[4-5/5] Gerando embeddings e persistindo no Supabase...")
+        # ── Etapas 3 + 4: Embeddings + persistência ──────────────────────────
+        logger.info("[3-4/4] Gerando embeddings e persistindo no Supabase...")
         _persistir_dados(codigo_if, dados)
 
         logger.info("╚══ Pipeline concluído com sucesso para '%s'. ══╝", codigo_if)
@@ -371,19 +335,6 @@ def executar_pipeline(codigo_if: str) -> None:
 
     finally:
         # ── Limpeza segura ────────────────────────────────────────────────────
-        logger.info("Iniciando limpeza de recursos temporários...")
-
-        if arquivo_gemini is not None:
-            try:
-                genai.delete_file(arquivo_gemini.name)
-                logger.info("Arquivo removido do servidor Gemini: '%s'.", arquivo_gemini.name)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Não foi possível deletar o arquivo Gemini '%s': %s",
-                    arquivo_gemini.name,
-                    exc,
-                )
-
         if caminho_pdf is not None:
             pdf_path = Path(caminho_pdf)
             if pdf_path.exists():
