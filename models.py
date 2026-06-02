@@ -21,20 +21,39 @@ class CRIMetadata(Base):
     codigo_if: Mapped[str] = mapped_column(String, index=True, nullable=False)
     securitizadora: Mapped[str | None] = mapped_column(String)
     numero_emissao: Mapped[int | None] = mapped_column(Integer)
-    series: Mapped[str | None] = mapped_column(String)
     agente_fiduciario: Mapped[str | None] = mapped_column(String)
     devedor: Mapped[str | None] = mapped_column(String)
     data_emissao: Mapped[date | None] = mapped_column(Date)
-    data_vencimento: Mapped[date | None] = mapped_column(Date)
-    indexador: Mapped[str | None] = mapped_column(String)
-    taxa_spread: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+    frequencia_juros: Mapped[str | None] = mapped_column(String)
+    data_inicio_juros: Mapped[date | None] = mapped_column(Date)
+    frequencia_amortizacao: Mapped[str | None] = mapped_column(String)
 
+    series: Mapped[list["CRISerie"]] = relationship(
+        back_populates="cri", cascade="all, delete-orphan"
+    )
     documentos: Mapped[list["CRIDocumento"]] = relationship(
         back_populates="cri", cascade="all, delete-orphan"
     )
     clausulas: Mapped[list["CRIClausula"]] = relationship(
         back_populates="cri", cascade="all, delete-orphan"
     )
+
+
+class CRISerie(Base):
+    __tablename__ = "cri_serie"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    cri_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("cri_metadata.id", ondelete="CASCADE"), nullable=False
+    )
+    nome_serie: Mapped[str | None] = mapped_column(String)
+    data_vencimento: Mapped[date | None] = mapped_column(Date)
+    indexador: Mapped[str | None] = mapped_column(String)
+    taxa_spread: Mapped[Decimal | None] = mapped_column(Numeric(10, 6))
+
+    cri: Mapped["CRIMetadata"] = relationship(back_populates="series")
 
 
 class CRIDocumento(Base):
