@@ -2,3 +2,6 @@ sqlalchemy>=2.0
 psycopg2-binary
 pgvector
 python-dotenv
+google-api-python-client
+google-auth
+google-auth-httplib2
