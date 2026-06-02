@@ -155,7 +155,7 @@ def _fazer_upload_pdf(caminho_pdf: str):
 def _extrair_dados_gemini(arquivo_gemini) -> dict:
     """Chama gemini-1.5-pro e retorna o dict extraído do PDF."""
     logger.info("Solicitando extração estruturada ao modelo gemini-1.5-pro...")
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
     resposta = model.generate_content(
         [arquivo_gemini, PROMPT_EXTRACAO],
