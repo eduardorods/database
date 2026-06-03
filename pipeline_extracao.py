@@ -51,6 +51,30 @@ conhecimento em Certificados de Recebíveis Imobiliários (CRIs).
 Analise o Termo de Securitização anexo e extraia as informações com máxima fidelidade ao \
 documento original.
 
+================================================================================
+⚠️  DIRETIVAS RIGOROSAS DE OCR E FORMATAÇÃO — LEIA ANTES DE QUALQUER OUTRA COISA
+================================================================================
+
+1. É ESTRITAMENTE PROIBIDO O USO DE LATEX OU CÓDIGOS MATEMÁTICOS DE QUALQUER TIPO.
+   Nunca escreva sequências como \\c, ~o, \\ca~o, ^{}, \\text{}, $...$ ou similares.
+
+2. O documento está em português do Brasil. Você deve atuar como um CORRETOR ORTOGRÁFICO:
+   - ac\\co~es        → ações
+   - instituic\\ca~o  → instituição
+   - \\ca~o           → ção
+   - emissa~o         → emissão
+   - obrigac\\co~es   → obrigações
+   Aplique esta correção em TODOS os campos do JSON, sem exceção.
+
+3. PROIBIÇÃO ABSOLUTA para a cláusula "termos_definidos":
+   - É PROIBIDO retornar texto corrido neste campo.
+   - O valor DEVE ser uma tabela Markdown com quebras de linha reais (\\n), neste formato exato:
+     | Termo | Descrição |\\n|---|---|\\n| Termo 1 | Descrição 1 |\\n| Termo 2 | Descrição 2 |
+   - Corrija todos os erros de OCR nos termos e nas descrições antes de montar a tabela.
+   - Se a seção não for encontrada, retorne apenas: | Termo | Descrição |\\n|---|---|
+
+================================================================================
+
 REGRAS OBRIGATÓRIAS:
 1. Retorne SOMENTE o objeto JSON válido, sem blocos markdown, sem texto explicativo.
 2. Preserve TODAS as chaves do schema, mesmo que o valor seja nulo.
