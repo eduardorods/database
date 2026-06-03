@@ -2,8 +2,8 @@
 Pipeline de extração de dados de Termos de Securitização de CRIs.
 
 Fluxo:
-  Google Drive → download PDF → Gemini File API → extração JSON estruturada
-  → embeddings por cláusula → persistência no Supabase → limpeza de recursos
+  Google Drive → download PDF → Gemini (inline) → extração JSON estruturada
+  → embeddings → persistência no Supabase → limpeza local
 """
 
 import argparse
@@ -33,15 +33,9 @@ logger = logging.getLogger(__name__)
 
 TEMP_DIR = Path("./temp")
 
-# Chaves das cláusulas — ordem importa para logs e inserção
 CLAUSULAS_KEYS = [
-    "fundo_reserva",
-    "fundo_despesa",
-    "covenants",
-    "garantias",
-    "amortizacao",
-    "cronograma_pagamentos",
     "termos_definidos",
+    "cronograma_pagamentos",
 ]
 
 PROMPT_EXTRACAO = """\
@@ -84,6 +78,15 @@ documento original.
    - JAMAIS deixe uma referência cruzada sem resolução. O usuário não tem acesso ao documento
      original e depende inteiramente do contexto que você fornecer.
 
+5. CRONOGRAMA DE PAGAMENTOS — EXTRAÇÃO COMPLETA DE TODAS AS SÉRIES:
+   - ATENÇÃO: Este documento pode conter múltiplas séries de CRI (ex: 178ª e 179ª Séries).
+   - Você é OBRIGADO a localizar e extrair o cronograma de pagamentos de TODAS as séries
+     presentes no documento. Não pare na primeira série encontrada.
+   - Formate a resposta estruturando cada série com um cabeçalho Markdown seguido da sua
+     respectiva tabela, usando \\n entre as linhas. Exemplo obrigatório:
+     ### Cronograma — 178ª Série\\n| Data | Amortização | Juros | Total |\\n|---|---|---|---|\\n| ... |\\n\\n### Cronograma — 179ª Série\\n| Data | Amortização | Juros | Total |\\n|---|---|---|---|\\n| ... |
+   - Se não encontrar nenhum cronograma, retorne: "Cronograma não localizado no documento."
+
 ================================================================================
 
 REGRAS OBRIGATÓRIAS:
@@ -92,20 +95,7 @@ REGRAS OBRIGATÓRIAS:
 3. Use null para strings/datas não encontradas e 0 para números não encontrados.
 4. Datas devem estar no formato YYYY-MM-DD.
 5. taxa_spread deve ser o valor decimal puro (ex.: 2.5 para "2,5% a.a.").
-6. Para o bloco "clausulas", transcreva o texto LITERAL do documento; não resuma nem parafraseie.
-7. cronograma_pagamentos deve ser formatado como tabela Markdown (| col | col |).
-8. Se houver múltiplas séries, liste todas no array "series".
-9. REGRA ESPECIAL — "termos_definidos" (cumprimento OBRIGATÓRIO):
-   - É PROIBIDO retornar texto corrido para este campo.
-   - INTERPRETE o conteúdo da seção de definições e corrija TODOS os erros de OCR
-     (palavras grudadas, caracteres estranhos como \c, ^, símbolos fora de contexto).
-   - O valor de "termos_definidos" DEVE ser uma tabela Markdown pura com exatamente
-     duas colunas: | Termo | Descrição |
-   - Use quebras de linha explícitas (\n) entre cada linha da tabela. O formato
-     obrigatório é:
-     "| Termo | Descrição |\n|---|---|\n| Termo 1 | Definição 1 |\n| Termo 2 | Definição 2 |"
-   - Inclua TODOS os termos definidos encontrados no documento, sem omitir nenhum.
-   - Se não encontrar a seção, retorne apenas o cabeçalho: "| Termo | Descrição |\n|---|---|"
+6. Se houver múltiplas séries, liste todas no array "series".
 
 Schema esperado:
 {
@@ -128,13 +118,8 @@ Schema esperado:
     }
   ],
   "clausulas": {
-    "fundo_reserva": "texto literal do documento",
-    "fundo_despesa": "texto literal do documento",
-    "covenants": "texto literal",
-    "garantias": "texto literal e pormenorizado",
-    "amortizacao": "texto literal",
-    "cronograma_pagamentos": "tabela em formato markdown",
-    "termos_definidos": "| Termo | Descrição |\n|---|---|\n| ... | ... |"
+    "termos_definidos": "| Termo | Descrição |\\n|---|---|\\n| ... | ... |",
+    "cronograma_pagamentos": "### Cronograma — Xª Série\\n| col | col |\\n|---|---|\\n| ... |"
   }
 }
 """
@@ -206,7 +191,7 @@ def _extrair_dados_gemini(caminho_pdf: str) -> dict:
 
 def _gerar_embedding(texto: str) -> list[float] | None:
     """
-    Gera vetor de 768 dimensões via text-embedding-004.
+    Gera vetor de 768 dimensões via embedding-001.
 
     Retorna None se o texto for vazio ou a chamada falhar (não bloqueia o pipeline).
     """
@@ -259,7 +244,7 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
     Salva em uma única transação:
       - 1 registro CRIMetadata
       - N registros CRISerie
-      - 7 registros CRIClausula (com embeddings quando disponíveis)
+      - 2 registros CRIClausula (termos_definidos + cronograma_pagamentos)
     """
     meta = dados.get("metadata", {})
     series_raw = dados.get("series", [])
@@ -281,7 +266,6 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
             frequencia_amortizacao=meta.get("frequencia_amortizacao") or None,
         )
         session.add(cri)
-        # flush para obter cri.id antes de criar os filhos
         session.flush()
         logger.debug("CRIMetadata criado com id='%s'.", cri.id)
 
@@ -297,17 +281,15 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
             session.add(obj_serie)
             logger.debug("CRISerie %d/%d adicionada: '%s'.", i, len(series_raw), obj_serie.nome_serie)
 
-        # 3. CRIClausula + embeddings
+        # 3. CRIClausula + embeddings (apenas termos_definidos e cronograma)
         for chave in CLAUSULAS_KEYS:
             texto = clausulas_raw.get(chave) or ""
             embedding = _gerar_embedding(texto)
 
             if embedding:
-                logger.debug(
-                    "Embedding gerado para cláusula '%s' (%d dims).", chave, len(embedding)
-                )
+                logger.debug("Embedding gerado para '%s' (%d dims).", chave, len(embedding))
             else:
-                logger.debug("Cláusula '%s' sem embedding (texto vazio ou erro).", chave)
+                logger.debug("'%s' sem embedding (texto vazio ou erro).", chave)
 
             session.add(
                 CRIClausula(
@@ -336,8 +318,7 @@ def executar_pipeline(codigo_if: str) -> None:
     """
     Executa o pipeline completo de extração para um código IF.
 
-    Garante limpeza de recursos (arquivo Gemini + PDF local) no bloco finally,
-    mesmo em caso de falha em qualquer etapa intermediária.
+    Garante limpeza do PDF local no bloco finally, mesmo em caso de falha.
     """
     logger.info("╔══ Pipeline iniciado para código IF: '%s' ══╗", codigo_if)
 
@@ -380,7 +361,6 @@ def executar_pipeline(codigo_if: str) -> None:
         raise
 
     finally:
-        # ── Limpeza segura ────────────────────────────────────────────────────
         if caminho_pdf is not None:
             pdf_path = Path(caminho_pdf)
             if pdf_path.exists():
@@ -403,7 +383,7 @@ if __name__ == "__main__":
             "processa com Gemini e persiste no Supabase."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Exemplo: python pipeline_extracao.py CRI12345678",
+        epilog="Exemplo: python pipeline_extracao.py 19K1139273",
     )
     parser.add_argument(
         "codigo_if",

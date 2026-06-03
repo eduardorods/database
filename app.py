@@ -53,7 +53,7 @@ h3 { font-size: 0.95rem !important; margin: 0.4rem 0 0.2rem 0 !important; font-w
     padding: 8px 12px !important;
 }
 
-/* ── Tabelas Markdown (cronograma do Gemini) ── */
+/* ── Tabelas Markdown (termos e cronograma) ── */
 table {
     border-collapse: collapse !important;
     width: 100% !important;
@@ -78,29 +78,14 @@ td {
 tr:nth-child(even) td { background-color: #f9fafb !important; }
 
 /* ── Dataframe (séries) ── */
-[data-testid="stDataFrame"] iframe {
-    min-height: unset !important;
-}
+[data-testid="stDataFrame"] iframe { min-height: unset !important; }
 .dvn-scroller { font-size: 12px !important; }
 
-/* ── Abas (st.tabs) ── */
-[data-testid="stTabs"] button {
-    font-size: 12px !important;
-    padding: 4px 12px !important;
-}
-[data-testid="stTabContent"] {
-    padding-top: 0.5rem !important;
-}
-
 /* ── Sidebar ── */
-[data-testid="stSidebar"] {
-    font-size: 13px !important;
-}
+[data-testid="stSidebar"] { font-size: 13px !important; }
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-    font-size: 0.9rem !important;
-}
+[data-testid="stSidebar"] h3 { font-size: 0.9rem !important; }
 
 /* ── Divider ── */
 hr { margin: 0.5rem 0 !important; border-color: #e5e7eb !important; }
@@ -111,7 +96,7 @@ hr { margin: 0.5rem 0 !important; border-color: #e5e7eb !important; }
     color: #6b7280 !important;
 }
 
-/* ── Texto corrido nas cláusulas ── */
+/* ── Texto corrido nas seções ── */
 [data-testid="stMarkdownContainer"] p {
     font-size: 13px !important;
     line-height: 1.55 !important;
@@ -119,17 +104,6 @@ hr { margin: 0.5rem 0 !important; border-color: #e5e7eb !important; }
 }
 </style>
 """, unsafe_allow_html=True)
-
-# Mapeamento entre chave interna e rótulo da aba
-CLAUSULAS_LABELS = {
-    "termos_definidos": "Termos Definidos",
-    "fundo_reserva": "Fundo de Reserva",
-    "fundo_despesa": "Fundo de Despesa",
-    "covenants": "Covenants",
-    "garantias": "Garantias",
-    "amortizacao": "Amortização",
-    "cronograma_pagamentos": "Cronograma",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +117,6 @@ def _buscar_cri(codigo_if: str) -> CRIMetadata | None:
             select(CRIMetadata).where(CRIMetadata.codigo_if == codigo_if)
         ).scalar_one_or_none()
         if resultado:
-            # expunge para usar fora da sessão
             session.expunge(resultado)
         return resultado
 
@@ -164,12 +137,20 @@ def _buscar_series(cri_id) -> list[dict]:
         ]
 
 
-def _buscar_clausulas(cri_id) -> dict[str, str]:
+def _buscar_clausula(cri_id, tipo: str) -> str:
     with SessionLocal() as session:
-        rows = session.execute(
-            select(CRIClausula).where(CRIClausula.cri_id == cri_id)
-        ).scalars().all()
-        return {r.tipo_clausula: r.texto_original or "" for r in rows}
+        row = session.execute(
+            select(CRIClausula).where(
+                CRIClausula.cri_id == cri_id,
+                CRIClausula.tipo_clausula == tipo,
+            )
+        ).scalar_one_or_none()
+        return row.texto_original or "" if row else ""
+
+
+def _render_markdown(texto: str) -> None:
+    """Renderiza texto do banco garantindo que \\n escapados virem quebras reais."""
+    st.markdown(texto.replace("\\n", "\n"), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -214,22 +195,23 @@ def _render_series(cri_id) -> None:
     st.divider()
 
 
-def _render_clausulas(cri_id) -> None:
-    st.subheader("Cláusulas")
-    clausulas = _buscar_clausulas(cri_id)
+def _render_termos_definidos(cri_id) -> None:
+    st.subheader("Termos Definidos")
+    texto = _buscar_clausula(cri_id, "termos_definidos")
+    if texto.strip():
+        _render_markdown(texto)
+    else:
+        st.caption("Termos definidos não extraídos para este CRI.")
+    st.divider()
 
-    if not clausulas:
-        st.info("Nenhuma cláusula encontrada para este CRI.")
-        return
 
-    abas = st.tabs(list(CLAUSULAS_LABELS.values()))
-    for aba, chave in zip(abas, CLAUSULAS_LABELS.keys()):
-        with aba:
-            texto = clausulas.get(chave, "")
-            if texto.strip():
-                st.markdown(texto.replace('\\n', '\n'), unsafe_allow_html=True)
-            else:
-                st.caption("Cláusula não encontrada no documento.")
+def _render_cronogramas(cri_id) -> None:
+    st.subheader("Cronogramas de Pagamento")
+    texto = _buscar_clausula(cri_id, "cronograma_pagamentos")
+    if texto.strip():
+        _render_markdown(texto)
+    else:
+        st.caption("Cronograma não extraído para este CRI.")
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +249,8 @@ def main() -> None:
     _render_header(cri)
     _render_metricas(cri)
     _render_series(cri.id)
-    _render_clausulas(cri.id)
+    _render_termos_definidos(cri.id)
+    _render_cronogramas(cri.id)
 
 
 if __name__ == "__main__":
