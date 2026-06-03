@@ -97,6 +97,24 @@ REGRAS OBRIGATÓRIAS:
 5. taxa_spread deve ser o valor decimal puro (ex.: 2.5 para "2,5% a.a.").
 6. Se houver múltiplas séries, liste todas no array "series".
 
+================================================================================
+🚨 REGRA CRÍTICA DE JSON — VIOLAÇÃO DESTA REGRA INUTILIZA TODO O RESULTADO
+================================================================================
+
+A sua resposta deve ser um JSON válido e perfeitamente parseável por json.loads().
+- É ESTRITAMENTE PROIBIDO inserir quebras de linha LITERAIS (reais) dentro dos valores
+  de texto. Qualquer quebra de linha — incluindo as de tabelas Markdown — DEVE ser
+  obrigatoriamente escapada como \\n (barra-n).
+- Qualquer aspa dupla dentro de um valor de texto DEVE ser escapada como \\".
+- Retorne APENAS o JSON puro, sem bloco de código markdown ao redor (sem ```json).
+
+Exemplo CORRETO  → "termos_definidos": "| Termo | Descrição |\\n|---|---|\\n| A | B |"
+Exemplo ERRADO   → "termos_definidos": "| Termo | Descrição |
+                                        |---|---|
+                                        | A | B |"
+
+================================================================================
+
 Schema esperado:
 {
   "metadata": {
@@ -167,10 +185,29 @@ def _extrair_dados_gemini(caminho_pdf: str) -> dict:
         ),
     )
 
+    texto_bruto = resposta.text or ""
+
+    # Sanitização 1: remove blocos de código markdown que o modelo pode inserir
+    texto_limpo = (
+        texto_bruto.strip()
+        .removeprefix("```json")
+        .removeprefix("```")
+        .removesuffix("```")
+        .strip()
+    )
+
+    # Sanitização 2: localiza a substring JSON (do primeiro { ao último })
+    inicio = texto_limpo.find("{")
+    fim = texto_limpo.rfind("}")
+    if inicio != -1 and fim != -1:
+        texto_limpo = texto_limpo[inicio : fim + 1]
+
     try:
-        dados = json.loads(resposta.text)
+        # strict=False aceita caracteres de controle não escapados (ex: \n literal)
+        # como último recurso, evitando falha total na extração
+        dados = json.loads(texto_limpo, strict=False)
     except json.JSONDecodeError as exc:
-        trecho = resposta.text[:500] if resposta.text else "<vazio>"
+        trecho = texto_limpo[:500] if texto_limpo else "<vazio>"
         logger.error("Resposta do Gemini não é JSON válido. Trecho: %s", trecho)
         raise ValueError(f"Gemini retornou JSON inválido: {exc}") from exc
 
