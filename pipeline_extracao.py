@@ -73,6 +73,17 @@ documento original.
    - Corrija todos os erros de OCR nos termos e nas descrições antes de montar a tabela.
    - Se a seção não for encontrada, retorne apenas: | Termo | Descrição |\\n|---|---|
 
+4. RESOLUÇÃO DE REFERÊNCIA CRUZADA (termos_definidos):
+   - Se a definição de um termo remeter a outra cláusula do documento
+     (ex: "Tem o significado previsto na Cláusula 3.10" ou "conforme descrito na Cláusula 5"),
+     você é OBRIGADO a localizar o conteúdo dessa cláusula específica no restante do documento
+     e adicioná-lo à descrição entre colchetes.
+   - Formato obrigatório:
+     Tem o significado previsto na Cláusula 3.10 [Texto completo ou resumo fiel da Cláusula 3.10
+     encontrada no documento].
+   - JAMAIS deixe uma referência cruzada sem resolução. O usuário não tem acesso ao documento
+     original e depende inteiramente do contexto que você fornecer.
+
 ================================================================================
 
 REGRAS OBRIGATÓRIAS:
