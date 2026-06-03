@@ -9,6 +9,117 @@ load_dotenv()
 
 st.set_page_config(page_title="Monitor de CRIs", layout="wide")
 
+st.markdown("""
+<style>
+/* ── Fonte e espaçamento global ── */
+html, body, [class*="css"], .stApp {
+    font-size: 13px !important;
+    line-height: 1.4 !important;
+    font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
+}
+
+/* ── Padding da área principal ── */
+.block-container {
+    padding-top: 1rem !important;
+    padding-bottom: 1rem !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+    max-width: 100% !important;
+}
+
+/* ── Cabeçalhos ── */
+h1 { font-size: 1.25rem !important; margin: 0 0 0.1rem 0 !important; font-weight: 600 !important; }
+h2 { font-size: 1.05rem !important; margin: 0.5rem 0 0.25rem 0 !important; font-weight: 600 !important; }
+h3 { font-size: 0.95rem !important; margin: 0.4rem 0 0.2rem 0 !important; font-weight: 600 !important; }
+
+/* ── Métricas (st.metric) ── */
+[data-testid="stMetricLabel"] {
+    font-size: 11px !important;
+    color: #6b7280 !important;
+    font-weight: 500 !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.03em !important;
+    margin-bottom: 0 !important;
+}
+[data-testid="stMetricValue"] {
+    font-size: 13px !important;
+    font-weight: 600 !important;
+    line-height: 1.3 !important;
+}
+[data-testid="metric-container"] {
+    background: #f8f9fb !important;
+    border: 1px solid #e5e7eb !important;
+    border-radius: 6px !important;
+    padding: 8px 12px !important;
+}
+
+/* ── Tabelas Markdown (cronograma do Gemini) ── */
+table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+    font-size: 10px !important;
+    margin: 0.5rem 0 !important;
+}
+th {
+    background-color: #f1f3f5 !important;
+    font-size: 10px !important;
+    font-weight: 600 !important;
+    padding: 4px 8px !important;
+    border: 1px solid #d1d5db !important;
+    text-align: left !important;
+    white-space: nowrap !important;
+}
+td {
+    font-size: 10px !important;
+    padding: 3px 8px !important;
+    border: 1px solid #e5e7eb !important;
+    vertical-align: top !important;
+}
+tr:nth-child(even) td { background-color: #f9fafb !important; }
+
+/* ── Dataframe (séries) ── */
+[data-testid="stDataFrame"] iframe {
+    min-height: unset !important;
+}
+.dvn-scroller { font-size: 12px !important; }
+
+/* ── Abas (st.tabs) ── */
+[data-testid="stTabs"] button {
+    font-size: 12px !important;
+    padding: 4px 12px !important;
+}
+[data-testid="stTabContent"] {
+    padding-top: 0.5rem !important;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] {
+    font-size: 13px !important;
+}
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    font-size: 0.9rem !important;
+}
+
+/* ── Divider ── */
+hr { margin: 0.5rem 0 !important; border-color: #e5e7eb !important; }
+
+/* ── Caption / texto auxiliar ── */
+[data-testid="stCaptionContainer"], small, caption {
+    font-size: 11px !important;
+    color: #6b7280 !important;
+}
+
+/* ── Texto corrido nas cláusulas ── */
+[data-testid="stMarkdownContainer"] p {
+    font-size: 13px !important;
+    line-height: 1.55 !important;
+    margin-bottom: 0.4rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # Mapeamento entre chave interna e rótulo da aba
 CLAUSULAS_LABELS = {
     "fundo_reserva": "Fundo de Reserva",
