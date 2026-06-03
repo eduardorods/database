@@ -67,16 +67,22 @@ documento original.
    - Corrija todos os erros de OCR nos termos e nas descrições antes de montar a tabela.
    - Se a seção não for encontrada, retorne apenas: | Termo | Descrição |\\n|---|---|
 
-4. RESOLUÇÃO DE REFERÊNCIA CRUZADA (termos_definidos):
-   - Se a definição de um termo remeter a outra cláusula do documento
-     (ex: "Tem o significado previsto na Cláusula 3.10" ou "conforme descrito na Cláusula 5"),
-     você é OBRIGADO a localizar o conteúdo dessa cláusula específica no restante do documento
-     e adicioná-lo à descrição entre colchetes.
-   - Formato obrigatório:
-     Tem o significado previsto na Cláusula 3.10 [Texto completo ou resumo fiel da Cláusula 3.10
-     encontrada no documento].
-   - JAMAIS deixe uma referência cruzada sem resolução. O usuário não tem acesso ao documento
-     original e depende inteiramente do contexto que você fornecer.
+4. BUSCA ATIVA OBRIGATÓRIA — CROSS-REFERENCE (TOLERÂNCIA ZERO A REFERÊNCIAS CEGAS):
+   - Para TODO termo definido que fizer remissão a outra cláusula do documento
+     (ex: "Cláusula 3.10", "Cláusula 3.13", "item 5.2", etc.) você deve atuar como
+     um AGENTE DE BUSCA.
+   - É EXPRESSAMENTE PROIBIDO devolver a resposta contendo apenas frases como:
+     "Tem o significado previsto na Cláusula X" — sem o conteúdo real da cláusula.
+   - Ao encontrar essa situação, VOCÊ É OBRIGADO a:
+     1. Interromper temporariamente a extração do termo atual.
+     2. Varrer o texto completo do documento até localizar a "Cláusula X" referenciada.
+     3. Extrair o seu significado ou texto real.
+     4. Injetar na tabela usando o formato exigido abaixo.
+   - FORMATO EXIGIDO:
+     Tem o significado previsto na Cláusula X: [TEXTO REAL DA CLÁUSULA ENCONTRADA NO DOCUMENTO]
+   - Referências cegas (sem o conteúdo resolvido) invalidarão a extração inteira.
+   - Se após varrer o documento a cláusula referenciada genuinamente não for encontrada,
+     escreva: Cláusula X não localizada no documento.
 
 5. CRONOGRAMA DE PAGAMENTOS — EXTRAÇÃO COMPLETA DE TODAS AS SÉRIES:
    - ATENÇÃO: Este documento pode conter múltiplas séries de CRI (ex: 178ª e 179ª Séries).
