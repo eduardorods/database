@@ -122,13 +122,13 @@ hr { margin: 0.5rem 0 !important; border-color: #e5e7eb !important; }
 
 # Mapeamento entre chave interna e rótulo da aba
 CLAUSULAS_LABELS = {
+    "termos_definidos": "Termos Definidos",
     "fundo_reserva": "Fundo de Reserva",
     "fundo_despesa": "Fundo de Despesa",
     "covenants": "Covenants",
     "garantias": "Garantias",
     "amortizacao": "Amortização",
     "cronograma_pagamentos": "Cronograma",
-    "termos_definidos": "Termos Definidos",
 }
 
 
