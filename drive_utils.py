@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 _SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 
-# Palavras-chave para priorizar o PDF correto quando há múltiplos na pasta
-_PALAVRAS_CHAVE_TERMO = ("termo", "securitizacao", "securitizacao")
+# Palavras-chave para classificação dos PDFs na pasta do CRI
+_PALAVRAS_CHAVE_TERMO = ("termo", "securitizacao")
+_PADROES_ADITAMENTO = ("ts_adit_",)
+_PADROES_ATA = ("ata_assembleia",)
 
 
 def _normalizar(texto: str) -> str:
@@ -269,3 +271,110 @@ def baixar_pdf_drive(service, file_id: str, diretorio_destino: str) -> str:
     caminho_final.write_bytes(buffer.getvalue())
     logger.info("Arquivo salvo em '%s'.", caminho_final)
     return str(caminho_final)
+
+
+# ---------------------------------------------------------------------------
+# Classificação e download em lote (Sprint 4)
+# ---------------------------------------------------------------------------
+
+
+def _classificar_pdfs(pdfs: list[dict]) -> dict:
+    """
+    Separa uma lista de PDFs em três categorias por padrão de nome.
+
+    Prioridade de classificação (em ordem):
+      1. Ata de assembleia  → nome contém 'ata_assembleia'
+      2. Aditamento         → nome contém 'ts_adit_'
+      3. Termo principal    → nome contém 'termo' ou 'securitizacao', ou primeiro PDF restante
+    """
+    termo: dict | None = None
+    aditamentos: list[dict] = []
+    atas: list[dict] = []
+
+    for pdf in pdfs:
+        nome_norm = _normalizar(pdf["name"])
+        if any(p in nome_norm for p in _PADROES_ATA):
+            atas.append(pdf)
+        elif any(p in nome_norm for p in _PADROES_ADITAMENTO):
+            aditamentos.append(pdf)
+        elif any(kw in nome_norm for kw in _PALAVRAS_CHAVE_TERMO):
+            if termo is None:
+                termo = pdf
+        else:
+            # PDF sem padrão reconhecido: candidato a termo principal se não houver outro
+            if termo is None:
+                termo = pdf
+
+    return {"termo": termo, "aditamentos": aditamentos, "atas": atas}
+
+
+def baixar_documentos_cri(
+    service, codigo_if: str, diretorio_destino: str
+) -> dict:
+    """
+    Localiza e baixa todos os documentos relevantes da pasta do CRI no Drive.
+
+    Identifica automaticamente o Termo Principal, Aditamentos (padrão 'ts_adit_')
+    e Atas de Assembleia (padrão 'ata_assembleia'), independente de maiúsculas.
+
+    Returns:
+        {
+            'termo_principal': 'temp/ts.pdf' | None,
+            'aditamentos': ['temp/TS_adit_1.pdf', ...],
+            'atas': ['temp/ata_assembleia_2025.pdf', ...]
+        }
+    """
+    pasta_raiz_id = os.environ.get("DRIVE_FOLDER_CRIS_ID")
+    if not pasta_raiz_id:
+        raise RuntimeError(
+            "Variável de ambiente DRIVE_FOLDER_CRIS_ID não definida. "
+            "Verifique seu arquivo .env."
+        )
+
+    resultado: dict = {"termo_principal": None, "aditamentos": [], "atas": []}
+
+    subpasta_id = _buscar_subpasta(service, pasta_raiz_id, codigo_if)
+    if not subpasta_id:
+        logger.warning("Subpasta '%s' não encontrada no Drive.", codigo_if)
+        return resultado
+
+    pdfs = _listar_pdfs(service, subpasta_id)
+    if not pdfs:
+        logger.warning("Nenhum PDF encontrado na pasta '%s'.", codigo_if)
+        return resultado
+
+    logger.info(
+        "%d PDF(s) encontrado(s) na pasta '%s'. Classificando...", len(pdfs), codigo_if
+    )
+    classificados = _classificar_pdfs(pdfs)
+
+    if classificados["termo"]:
+        try:
+            caminho = baixar_pdf_drive(
+                service, classificados["termo"]["id"], diretorio_destino
+            )
+            resultado["termo_principal"] = caminho
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Erro ao baixar Termo Principal: %s", exc)
+
+    for pdf in classificados["aditamentos"]:
+        try:
+            caminho = baixar_pdf_drive(service, pdf["id"], diretorio_destino)
+            resultado["aditamentos"].append(caminho)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Erro ao baixar aditamento '%s': %s", pdf["name"], exc)
+
+    for pdf in classificados["atas"]:
+        try:
+            caminho = baixar_pdf_drive(service, pdf["id"], diretorio_destino)
+            resultado["atas"].append(caminho)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Erro ao baixar ata '%s': %s", pdf["name"], exc)
+
+    logger.info(
+        "Download concluído para '%s': 1 Termo | %d Aditamento(s) | %d Ata(s).",
+        codigo_if,
+        len(resultado["aditamentos"]),
+        len(resultado["atas"]),
+    )
+    return resultado

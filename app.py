@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from sqlalchemy import select
 
 from database import SessionLocal
-from models import CRIClausula, CRIMetadata, CRISerie
+from models import CRIClausula, CRIEvento, CRIMetadata, CRISerie
 
 load_dotenv()
 
@@ -148,6 +148,18 @@ def _buscar_clausula(cri_id, tipo: str) -> str:
         return row.texto_original or "" if row else ""
 
 
+def _buscar_eventos(cri_id, tipo: str) -> list:
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(CRIEvento)
+            .where(CRIEvento.cri_id == cri_id, CRIEvento.tipo_documento == tipo)
+            .order_by(CRIEvento.data_evento)
+        ).scalars().all()
+        for r in rows:
+            session.expunge(r)
+        return rows
+
+
 def _render_markdown(texto: str) -> None:
     """Renderiza texto do banco garantindo que \\n escapados virem quebras reais."""
     st.markdown(texto.replace("\\n", "\n"), unsafe_allow_html=True)
@@ -214,6 +226,21 @@ def _render_cronogramas(cri_id) -> None:
         st.caption("Cronograma não extraído para este CRI.")
 
 
+def _render_eventos(cri_id, tipo: str, titulo: str) -> None:
+    st.header(titulo)
+    eventos = _buscar_eventos(cri_id, tipo)
+    if not eventos:
+        st.caption(f"Nenhum(a) {titulo.lower()} encontrado(a) para este CRI.")
+        return
+    for evento in eventos:
+        label = f"{evento.data_evento or 'Data não identificada'} — {evento.nome_arquivo or ''}"
+        with st.expander(label):
+            if evento.resumo:
+                st.markdown(evento.resumo.replace("\\n", "\n"), unsafe_allow_html=True)
+            else:
+                st.caption("Resumo não disponível.")
+
+
 # ---------------------------------------------------------------------------
 # App principal
 # ---------------------------------------------------------------------------
@@ -251,6 +278,8 @@ def main() -> None:
     _render_series(cri.id)
     _render_termos_definidos(cri.id)
     _render_cronogramas(cri.id)
+    _render_eventos(cri.id, "ADITAMENTO", "Aditamentos")
+    _render_eventos(cri.id, "ATA", "Atas de Assembleia")
 
 
 if __name__ == "__main__":

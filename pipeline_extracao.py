@@ -2,12 +2,10 @@
 Pipeline de extração de dados de Termos de Securitização de CRIs.
 
 Fluxo:
-  Google Drive → download PDF → Two-Pass Gemini Architecture
-    Passo 1: extração base (Termos + Cronograma)
-    Passo 2: mapeamento de referências cruzadas via Python/Regex
-    Passo 3: segunda chamada Gemini para extrair textos das cláusulas referenciadas
-    Passo 4: enriquecimento dos Termos Definidos via Python
-  → embeddings → persistência no Supabase → limpeza local
+  Google Drive → download em lote (TS + Aditamentos + Atas)
+  → Two-Pass Gemini Architecture (Termos + Cronograma + Cross-reference)
+  → Extração de Eventos (Aditamentos e Atas)
+  → Embeddings → Persistência no Supabase → Limpeza local
 """
 
 import argparse
@@ -16,6 +14,7 @@ import logging
 import os
 import re
 import sys
+import uuid
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -24,8 +23,8 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 
 from database import SessionLocal
-from drive_utils import baixar_pdf_drive, encontrar_termo_por_codigo_if, obter_servico
-from models import CRIClausula, CRIMetadata, CRISerie
+from drive_utils import baixar_documentos_cri, obter_servico
+from models import CRIClausula, CRIEvento, CRIMetadata, CRISerie
 
 load_dotenv()
 
@@ -43,7 +42,10 @@ CLAUSULAS_KEYS = [
     "cronograma_pagamentos",
 ]
 
-# Passo 1: extração base — sem instrução de cross-reference (Python resolve)
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
+
 PROMPT_EXTRACAO = """\
 Você é um especialista em instrumentos financeiros brasileiros de renda fixa, com profundo \
 conhecimento em Certificados de Recebíveis Imobiliários (CRIs).
@@ -134,7 +136,7 @@ Schema esperado:
 }
 """
 
-# Passo 3: prompt em formato XML/tags — robusto para textos jurídicos longos
+# Passo 3 da Two-Pass Architecture: extração de cláusulas via XML/tags
 PROMPT_CLAUSULAS_TEMPLATE = """\
 O documento em anexo é um Termo de Securitização de CRI (contrato financeiro em português).
 
@@ -152,9 +154,30 @@ Regras:
 - Não adicione nenhum texto fora das tags <item>.
 """
 
+# Sprint 4: extração de data e resumo de Aditamentos e Atas
+PROMPT_EVENTO_TEMPLATE = """\
+O documento em anexo é um(a) {tipo} de um Fundo/CRI em português do Brasil.
+
+Leia o documento completo e retorne um JSON com exatamente duas chaves:
+- "data_evento": a data em que o documento ocorreu ou foi assinado (formato DD/MM/YYYY ou por extenso).
+- "resumo": um resumo detalhado e executivo das principais modificações, dispensas de covenants
+  ou deliberações aprovadas. Seja específico: mencione valores, percentuais, prazos e partes
+  envolvidas quando presentes.
+
+🚨 REGRA CRÍTICA DE JSON: Qualquer quebra de linha DEVE ser escapada como \\n.
+   Qualquer aspa dupla DEVE ser escapada como \\".
+   Retorne APENAS o JSON puro, sem ```json ao redor.
+
+Formato obrigatório:
+{{
+  "data_evento": "DD/MM/YYYY",
+  "resumo": "Resumo executivo detalhado..."
+}}
+"""
+
 
 # ---------------------------------------------------------------------------
-# Configuração e autenticação
+# Configuração
 # ---------------------------------------------------------------------------
 
 
@@ -169,7 +192,7 @@ def _configurar_gemini() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Two-Pass Architecture — funções auxiliares
+# Helpers compartilhados
 # ---------------------------------------------------------------------------
 
 
@@ -187,207 +210,6 @@ def _sanitizar_json(texto_bruto: str) -> str:
     if inicio != -1 and fim != -1:
         return texto[inicio : fim + 1]
     return texto
-
-
-def _mapear_referencias_cruzadas(termos_texto: str) -> list[str]:
-    """
-    Usa regex para encontrar referências a cláusulas no texto de Termos Definidos.
-    Retorna lista de referências únicas preservando a primeira ocorrência.
-    """
-    if not termos_texto:
-        return []
-    matches = re.findall(r"[Cc]l[aá]usula\s+\d+(?:\.\d+)*", termos_texto)
-    seen: set[str] = set()
-    unicas: list[str] = []
-    for m in matches:
-        # normaliza capitalização para deduplicação
-        chave = m.strip().lower()
-        if chave not in seen:
-            seen.add(chave)
-            # preserva capitalização original da primeira ocorrência
-            unicas.append(m.strip())
-    return unicas
-
-
-def _extrair_clausulas_referenciadas(
-    pdf_bytes: bytes, clausulas: list[str]
-) -> dict[str, str]:
-    """
-    Passo 3: chama o Gemini pedindo os textos das cláusulas em formato XML/tags.
-
-    Usa tags <item id="...">...</item> em vez de JSON para suportar textos
-    jurídicos longos sem risco de estouro por delimitadores mal escapados.
-    """
-    lista_str = ", ".join(clausulas)
-    prompt = PROMPT_CLAUSULAS_TEMPLATE.format(lista_clausulas=lista_str)
-
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
-    resposta = model.generate_content(
-        [{"mime_type": "application/pdf", "data": pdf_bytes}, prompt],
-        generation_config=genai.GenerationConfig(temperature=0.0),
-    )
-
-    texto_resposta = resposta.text or ""
-    clausulas_extraidas: dict[str, str] = {}
-
-    matches = re.finditer(
-        r'<item\s+id="(.*?)">(.*?)</item>',
-        texto_resposta,
-        re.DOTALL | re.IGNORECASE,
-    )
-    for match in matches:
-        chave = match.group(1).strip()
-        valor = match.group(2).strip()
-        clausulas_extraidas[chave] = valor
-
-    if not clausulas_extraidas:
-        logger.warning(
-            "Passo 3: nenhuma tag <item> encontrada na resposta. "
-            "Trecho: %s", texto_resposta[:300]
-        )
-
-    return clausulas_extraidas
-
-
-def _enriquecer_termos_definidos(
-    termos_texto: str, clausulas_map: dict[str, str]
-) -> str:
-    """
-    Passo 4: para cada referência encontrada no termos_texto, substitui
-    'Cláusula X' por 'Cláusula X: [Texto: <conteúdo>]'.
-    Usa lookup case-insensitive para tolerar variações de capitalização.
-    """
-    if not clausulas_map:
-        return termos_texto
-
-    # Índice normalizado para lookup rápido
-    indice = {k.strip().lower(): v for k, v in clausulas_map.items()}
-
-    def substituir(match: re.Match) -> str:
-        referencia = match.group(0)
-        texto_clausula = indice.get(referencia.strip().lower())
-        if texto_clausula and texto_clausula != "Cláusula não localizada no documento.":
-            return f"{referencia}: [Texto: {texto_clausula}]"
-        if texto_clausula == "Cláusula não localizada no documento.":
-            return f"{referencia} [não localizada no documento]"
-        return referencia
-
-    return re.sub(r"[Cc]l[aá]usula\s+\d+(?:\.\d+)*", substituir, termos_texto)
-
-
-# ---------------------------------------------------------------------------
-# Extração estruturada — Two-Pass Architecture
-# ---------------------------------------------------------------------------
-
-
-def _extrair_dados_gemini(caminho_pdf: str) -> dict:
-    """
-    Executa a arquitetura de dois passes para extração robusta de dados.
-
-    Passo 1 — Extração base via Gemini (Termos + Cronograma).
-    Passo 2 — Python/Regex mapeia referências cruzadas nos Termos Definidos.
-    Passo 3 — Segunda chamada Gemini extrai textos das cláusulas referenciadas.
-    Passo 4 — Python injeta os textos resolvidos nos Termos Definidos.
-    """
-    logger.info("Lendo PDF para envio inline ao Gemini: '%s'...", caminho_pdf)
-    pdf_bytes = Path(caminho_pdf).read_bytes()
-    logger.info("PDF carregado (%.1f MB).", len(pdf_bytes) / 1_048_576)
-
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
-    gen_config = genai.GenerationConfig(
-        response_mime_type="application/json", temperature=0.0
-    )
-
-    # ── Passo 1: Extração base ──────────────────────────────────────────────
-    logger.info("[Passo 1/4] Iniciando extração base (Termos Definidos + Cronograma)...")
-    resposta = model.generate_content(
-        [{"mime_type": "application/pdf", "data": pdf_bytes}, PROMPT_EXTRACAO],
-        generation_config=gen_config,
-    )
-
-    texto_limpo = _sanitizar_json(resposta.text or "")
-    try:
-        dados = json.loads(texto_limpo, strict=False)
-    except json.JSONDecodeError as exc:
-        logger.error("Passo 1: JSON inválido. Trecho: %s", texto_limpo[:500])
-        raise ValueError(f"Gemini retornou JSON inválido: {exc}") from exc
-
-    n_series = len(dados.get("series", []))
-    logger.info(
-        "[Passo 1/4] Concluído: %d série(s) extraída(s).", n_series
-    )
-
-    # ── Passo 2: Mapeamento de referências cruzadas via Python/Regex ────────
-    logger.info("[Passo 2/4] Mapeando referências cruzadas nos Termos Definidos...")
-    termos_texto = dados.get("clausulas", {}).get("termos_definidos", "")
-    clausulas_referenciadas = _mapear_referencias_cruzadas(termos_texto)
-
-    if not clausulas_referenciadas:
-        logger.info(
-            "[Passo 2/4] Nenhuma referência cruzada identificada. Pulando Passos 3 e 4."
-        )
-        return dados
-
-    logger.info(
-        "[Passo 2/4] Identificadas %d cláusula(s) para busca: %s",
-        len(clausulas_referenciadas),
-        clausulas_referenciadas,
-    )
-
-    # ── Passo 3: Segunda chamada ao Gemini para extrair cláusulas ───────────
-    logger.info(
-        "[Passo 3/4] Iniciando extração das %d cláusula(s) referenciada(s)...",
-        len(clausulas_referenciadas),
-    )
-    clausulas_map = _extrair_clausulas_referenciadas(pdf_bytes, clausulas_referenciadas)
-    n_encontradas = sum(
-        1 for v in clausulas_map.values()
-        if v and v != "Cláusula não localizada no documento."
-    )
-    logger.info(
-        "[Passo 3/4] Concluído: %d/%d cláusula(s) localizada(s) no documento.",
-        n_encontradas,
-        len(clausulas_referenciadas),
-    )
-
-    # ── Passo 4: Enriquecimento dos Termos Definidos via Python ─────────────
-    logger.info("[Passo 4/4] Enriquecendo Termos Definidos com textos resolvidos...")
-    dados["clausulas"]["termos_definidos"] = _enriquecer_termos_definidos(
-        termos_texto, clausulas_map
-    )
-    logger.info("[Passo 4/4] Termos Definidos enriquecidos com sucesso.")
-
-    return dados
-
-
-# ---------------------------------------------------------------------------
-# Embeddings
-# ---------------------------------------------------------------------------
-
-
-def _gerar_embedding(texto: str) -> list[float] | None:
-    """
-    Gera vetor de 768 dimensões via embedding-001.
-
-    Retorna None se o texto for vazio ou a chamada falhar (não bloqueia o pipeline).
-    """
-    if not texto or not texto.strip():
-        return None
-    try:
-        resultado = genai.embed_content(
-            model="models/embedding-001",
-            content=texto,
-            task_type="RETRIEVAL_DOCUMENT",
-        )
-        return resultado["embedding"]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Falha ao gerar embedding (texto truncado: '%.60s...'): %s", texto, exc)
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Helpers de conversão
-# ---------------------------------------------------------------------------
 
 
 def _parse_data(valor: str | None) -> date | None:
@@ -410,23 +232,205 @@ def _parse_decimal(valor) -> Decimal | None:
         return None
 
 
+def _gerar_embedding(texto: str) -> list[float] | None:
+    if not texto or not texto.strip():
+        return None
+    try:
+        resultado = genai.embed_content(
+            model="models/embedding-001",
+            content=texto,
+            task_type="RETRIEVAL_DOCUMENT",
+        )
+        return resultado["embedding"]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Falha ao gerar embedding ('%.60s...'): %s", texto, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Two-Pass Architecture — Termo de Securitização
+# ---------------------------------------------------------------------------
+
+
+def _mapear_referencias_cruzadas(termos_texto: str) -> list[str]:
+    if not termos_texto:
+        return []
+    matches = re.findall(r"[Cc]l[aá]usula\s+\d+(?:\.\d+)*", termos_texto)
+    seen: set[str] = set()
+    unicas: list[str] = []
+    for m in matches:
+        chave = m.strip().lower()
+        if chave not in seen:
+            seen.add(chave)
+            unicas.append(m.strip())
+    return unicas
+
+
+def _extrair_clausulas_referenciadas(
+    pdf_bytes: bytes, clausulas: list[str]
+) -> dict[str, str]:
+    """Passo 3: segunda chamada Gemini via XML/tags — robusto para textos longos."""
+    lista_str = ", ".join(clausulas)
+    prompt = PROMPT_CLAUSULAS_TEMPLATE.format(lista_clausulas=lista_str)
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    resposta = model.generate_content(
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, prompt],
+        generation_config=genai.GenerationConfig(temperature=0.0),
+    )
+
+    texto_resposta = resposta.text or ""
+    clausulas_extraidas: dict[str, str] = {}
+    for match in re.finditer(
+        r'<item\s+id="(.*?)">(.*?)</item>', texto_resposta, re.DOTALL | re.IGNORECASE
+    ):
+        clausulas_extraidas[match.group(1).strip()] = match.group(2).strip()
+
+    if not clausulas_extraidas:
+        logger.warning(
+            "Passo 3: nenhuma tag <item> encontrada. Trecho: %s", texto_resposta[:300]
+        )
+    return clausulas_extraidas
+
+
+def _enriquecer_termos_definidos(
+    termos_texto: str, clausulas_map: dict[str, str]
+) -> str:
+    if not clausulas_map:
+        return termos_texto
+    indice = {k.strip().lower(): v for k, v in clausulas_map.items()}
+
+    def substituir(match: re.Match) -> str:
+        ref = match.group(0)
+        texto_clausula = indice.get(ref.strip().lower())
+        if texto_clausula and texto_clausula != "Cláusula não localizada no documento.":
+            return f"{ref}: [Texto: {texto_clausula}]"
+        if texto_clausula == "Cláusula não localizada no documento.":
+            return f"{ref} [não localizada no documento]"
+        return ref
+
+    return re.sub(r"[Cc]l[aá]usula\s+\d+(?:\.\d+)*", substituir, termos_texto)
+
+
+def _extrair_dados_gemini(caminho_pdf: str) -> dict:
+    """
+    Two-Pass Architecture para extração do Termo de Securitização.
+
+    Passo 1 — Extração base (Termos + Cronograma).
+    Passo 2 — Python/Regex mapeia referências cruzadas.
+    Passo 3 — Segunda chamada Gemini extrai textos das cláusulas referenciadas.
+    Passo 4 — Python injeta os textos nos Termos Definidos.
+    """
+    logger.info("Lendo PDF: '%s'...", caminho_pdf)
+    pdf_bytes = Path(caminho_pdf).read_bytes()
+    logger.info("PDF carregado (%.1f MB).", len(pdf_bytes) / 1_048_576)
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    gen_config = genai.GenerationConfig(
+        response_mime_type="application/json", temperature=0.0
+    )
+
+    logger.info("[Passo 1/4] Iniciando extração base (Termos Definidos + Cronograma)...")
+    resposta = model.generate_content(
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, PROMPT_EXTRACAO],
+        generation_config=gen_config,
+    )
+    texto_limpo = _sanitizar_json(resposta.text or "")
+    try:
+        dados = json.loads(texto_limpo, strict=False)
+    except json.JSONDecodeError as exc:
+        logger.error("Passo 1: JSON inválido. Trecho: %s", texto_limpo[:500])
+        raise ValueError(f"Gemini retornou JSON inválido: {exc}") from exc
+    logger.info("[Passo 1/4] Concluído: %d série(s) extraída(s).", len(dados.get("series", [])))
+
+    logger.info("[Passo 2/4] Mapeando referências cruzadas nos Termos Definidos...")
+    termos_texto = dados.get("clausulas", {}).get("termos_definidos", "")
+    clausulas_referenciadas = _mapear_referencias_cruzadas(termos_texto)
+
+    if not clausulas_referenciadas:
+        logger.info("[Passo 2/4] Nenhuma referência cruzada. Pulando Passos 3 e 4.")
+        return dados
+
+    logger.info(
+        "[Passo 2/4] Identificadas %d cláusula(s): %s",
+        len(clausulas_referenciadas), clausulas_referenciadas,
+    )
+
+    logger.info("[Passo 3/4] Extraindo textos das cláusulas referenciadas...")
+    clausulas_map = _extrair_clausulas_referenciadas(pdf_bytes, clausulas_referenciadas)
+    n_ok = sum(1 for v in clausulas_map.values() if v != "Cláusula não localizada no documento.")
+    logger.info("[Passo 3/4] %d/%d cláusula(s) localizada(s).", n_ok, len(clausulas_referenciadas))
+
+    logger.info("[Passo 4/4] Enriquecendo Termos Definidos...")
+    dados["clausulas"]["termos_definidos"] = _enriquecer_termos_definidos(
+        termos_texto, clausulas_map
+    )
+    logger.info("[Passo 4/4] Termos Definidos enriquecidos com sucesso.")
+
+    return dados
+
+
+# ---------------------------------------------------------------------------
+# Sprint 4 — Extração de Eventos (Aditamentos e Atas)
+# ---------------------------------------------------------------------------
+
+
+def _extrair_evento_gemini(caminho_pdf: str, tipo: str) -> dict:
+    """
+    Extrai data e resumo executivo de um Aditamento ou Ata de Assembleia.
+
+    Args:
+        caminho_pdf: caminho local do PDF.
+        tipo: 'ADITAMENTO' ou 'ATA'.
+
+    Returns:
+        {'data_evento': '...', 'resumo': '...'}
+    """
+    logger.info("Extraindo evento '%s': '%s'...", tipo, Path(caminho_pdf).name)
+    pdf_bytes = Path(caminho_pdf).read_bytes()
+    prompt = PROMPT_EVENTO_TEMPLATE.format(tipo=tipo.lower().replace("_", " "))
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    resposta = model.generate_content(
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, prompt],
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.0,
+        ),
+    )
+
+    texto_limpo = _sanitizar_json(resposta.text or "")
+    try:
+        dados = json.loads(texto_limpo, strict=False)
+        logger.info(
+            "Evento extraído: data='%s', resumo=%.60s...",
+            dados.get("data_evento"), dados.get("resumo", ""),
+        )
+        return dados
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Evento '%s': JSON inválido (%s). Retornando vazio.", caminho_pdf, exc
+        )
+        return {"data_evento": None, "resumo": None}
+
+
 # ---------------------------------------------------------------------------
 # Persistência
 # ---------------------------------------------------------------------------
 
 
-def _persistir_dados(codigo_if: str, dados: dict) -> None:
+def _persistir_dados(codigo_if: str, dados: dict) -> uuid.UUID:
     """
-    Salva em uma única transação:
-      - 1 registro CRIMetadata
-      - N registros CRISerie
-      - 2 registros CRIClausula (termos_definidos + cronograma_pagamentos)
+    Salva CRIMetadata, CRISerie e CRIClausula numa única transação.
+
+    Returns:
+        UUID do CRIMetadata criado (usado para vincular CRIEvento).
     """
     meta = dados.get("metadata", {})
     series_raw = dados.get("series", [])
     clausulas_raw = dados.get("clausulas", {})
 
-    logger.info("Iniciando persistência para código IF '%s'...", codigo_if)
+    logger.info("Persistindo dados do TS para código IF '%s'...", codigo_if)
 
     with SessionLocal() as session:
         cri = CRIMetadata(
@@ -442,7 +446,6 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
         )
         session.add(cri)
         session.flush()
-        logger.debug("CRIMetadata criado com id='%s'.", cri.id)
 
         for i, serie in enumerate(series_raw, start=1):
             session.add(CRISerie(
@@ -463,15 +466,32 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
                 texto_original=texto or None,
                 embedding=embedding,
             ))
-            logger.debug("CRIClausula '%s' adicionada (embedding=%s).", chave, embedding is not None)
 
         session.commit()
+        cri_id = cri.id
 
     logger.info(
-        "Persistência concluída: 1 CRIMetadata | %d CRISerie | %d CRIClausula.",
-        len(series_raw),
-        len(CLAUSULAS_KEYS),
+        "TS persistido: 1 CRIMetadata | %d CRISerie | %d CRIClausula.",
+        len(series_raw), len(CLAUSULAS_KEYS),
     )
+    return cri_id
+
+
+def _persistir_evento(
+    cri_id: uuid.UUID, caminho_pdf: str, tipo: str, dados: dict
+) -> None:
+    """Salva um CRIEvento (Aditamento ou Ata) vinculado ao CRIMetadata."""
+    nome_arquivo = Path(caminho_pdf).name
+    with SessionLocal() as session:
+        session.add(CRIEvento(
+            cri_id=cri_id,
+            tipo_documento=tipo,
+            nome_arquivo=nome_arquivo,
+            data_evento=dados.get("data_evento"),
+            resumo=dados.get("resumo"),
+        ))
+        session.commit()
+    logger.info("CRIEvento persistido: '%s' (%s).", nome_arquivo, tipo)
 
 
 # ---------------------------------------------------------------------------
@@ -481,36 +501,51 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
 
 def executar_pipeline(codigo_if: str) -> None:
     """
-    Executa o pipeline completo de extração para um código IF.
+    Executa o pipeline completo para um código IF:
 
-    Garante limpeza do PDF local no bloco finally, mesmo em caso de falha.
+    1. Baixa todos os documentos do Drive (TS + Aditamentos + Atas).
+    2. Extrai e persiste o Termo de Securitização (Two-Pass Architecture).
+    3. Extrai e persiste cada Aditamento e Ata como CRIEvento.
+    4. Remove todos os PDFs temporários no finally.
     """
     logger.info("╔══ Pipeline iniciado para código IF: '%s' ══╗", codigo_if)
-
     _configurar_gemini()
 
-    caminho_pdf: str | None = None
+    documentos: dict = {"termo_principal": None, "aditamentos": [], "atas": []}
 
     try:
-        logger.info("[1/3] Localizando e baixando PDF do Google Drive...")
+        # ── Etapa 1: Download em lote do Drive ──────────────────────────────
+        logger.info("[1/3] Baixando documentos do Google Drive...")
         drive_service = obter_servico()
-        file_id = encontrar_termo_por_codigo_if(drive_service, codigo_if)
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        documentos = baixar_documentos_cri(drive_service, codigo_if, str(TEMP_DIR))
 
-        if not file_id:
-            logger.error(
-                "Termo de Securitização não encontrado no Drive para '%s'.", codigo_if
-            )
+        if not documentos["termo_principal"]:
+            logger.error("Termo de Securitização não encontrado para '%s'. Abortando.", codigo_if)
             return
 
-        TEMP_DIR.mkdir(parents=True, exist_ok=True)
-        caminho_pdf = baixar_pdf_drive(drive_service, file_id, str(TEMP_DIR))
-        logger.info("[1/3] PDF disponível em: '%s'.", caminho_pdf)
+        # ── Etapa 2: Two-Pass Architecture — Termo de Securitização ─────────
+        logger.info("[2/3] Processando Termo de Securitização...")
+        dados_ts = _extrair_dados_gemini(documentos["termo_principal"])
+        cri_id = _persistir_dados(codigo_if, dados_ts)
 
-        logger.info("[2/3] Executando Two-Pass Architecture com Gemini...")
-        dados = _extrair_dados_gemini(caminho_pdf)
+        # ── Etapa 3: Extração de Eventos ────────────────────────────────────
+        total_eventos = len(documentos["aditamentos"]) + len(documentos["atas"])
+        logger.info("[3/3] Processando %d evento(s) (Aditamentos + Atas)...", total_eventos)
 
-        logger.info("[3/3] Gerando embeddings e persistindo no Supabase...")
-        _persistir_dados(codigo_if, dados)
+        for caminho in documentos["aditamentos"]:
+            try:
+                dados_evento = _extrair_evento_gemini(caminho, "ADITAMENTO")
+                _persistir_evento(cri_id, caminho, "ADITAMENTO", dados_evento)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Falha ao processar aditamento '%s': %s", caminho, exc)
+
+        for caminho in documentos["atas"]:
+            try:
+                dados_evento = _extrair_evento_gemini(caminho, "ATA")
+                _persistir_evento(cri_id, caminho, "ATA", dados_evento)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Falha ao processar ata '%s': %s", caminho, exc)
 
         logger.info("╚══ Pipeline concluído com sucesso para '%s'. ══╝", codigo_if)
 
@@ -519,14 +554,16 @@ def executar_pipeline(codigo_if: str) -> None:
         raise
 
     finally:
-        if caminho_pdf is not None:
-            pdf_path = Path(caminho_pdf)
-            if pdf_path.exists():
-                try:
-                    pdf_path.unlink()
-                    logger.info("PDF local removido: '%s'.", caminho_pdf)
-                except OSError as exc:
-                    logger.warning("Não foi possível remover o PDF local '%s': %s", caminho_pdf, exc)
+        # Remove todos os PDFs temporários baixados
+        todos_caminhos = [documentos["termo_principal"]] if documentos["termo_principal"] else []
+        todos_caminhos += documentos.get("aditamentos", [])
+        todos_caminhos += documentos.get("atas", [])
+        for caminho in todos_caminhos:
+            try:
+                Path(caminho).unlink(missing_ok=True)
+                logger.info("PDF removido: '%s'.", caminho)
+            except OSError as exc:
+                logger.warning("Não foi possível remover '%s': %s", caminho, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -537,8 +574,8 @@ def executar_pipeline(codigo_if: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
-            "Extrai dados de um Termo de Securitização de CRI do Google Drive, "
-            "processa com Gemini (Two-Pass) e persiste no Supabase."
+            "Extrai dados de um CRI do Google Drive (TS + Aditamentos + Atas), "
+            "processa com Gemini e persiste no Supabase."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Exemplo: python pipeline_extracao.py 19K1139273",
