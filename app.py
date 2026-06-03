@@ -155,12 +155,16 @@ def _buscar_eventos(cri_id, tipo: str) -> list:
     with SessionLocal() as session:
         rows = session.execute(
             select(CRIEvento)
-            .where(CRIEvento.cri_id == cri_id, CRIEvento.tipo_documento == tipo)
+            .where(CRIEvento.cri_id == cri_id)
             .order_by(CRIEvento.data_evento)
         ).scalars().all()
-        for r in rows:
+        filtrados = [
+            r for r in rows
+            if r.tipo_documento and tipo.lower() in r.tipo_documento.lower()
+        ]
+        for r in filtrados:
             session.expunge(r)
-        return rows
+        return filtrados
 
 
 def _render_markdown(texto: str) -> None:
