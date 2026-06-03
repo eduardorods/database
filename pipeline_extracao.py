@@ -168,7 +168,7 @@ def _gerar_embedding(texto: str) -> list[float] | None:
         return None
     try:
         resultado = genai.embed_content(
-            model="models/text-embedding-004",
+            model="models/embedding-001",
             content=texto,
             task_type="RETRIEVAL_DOCUMENT",
         )
