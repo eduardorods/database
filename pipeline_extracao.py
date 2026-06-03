@@ -134,25 +134,22 @@ Schema esperado:
 }
 """
 
-# Passo 3: prompt focado na extração das cláusulas referenciadas
+# Passo 3: prompt em formato XML/tags — robusto para textos jurídicos longos
 PROMPT_CLAUSULAS_TEMPLATE = """\
 O documento em anexo é um Termo de Securitização de CRI (contrato financeiro em português).
 
 Extraia o texto integral ESTRITAMENTE das seguintes cláusulas: {lista_clausulas}
 
+NÃO RETORNE JSON. Retorne OBRIGATORIAMENTE no seguinte formato de tags para cada cláusula:
+
+<item id="Cláusula 3.10">TEXTO INTEGRAL DA CLÁUSULA AQUI</item>
+<item id="Cláusula 5.1">TEXTO INTEGRAL DA CLÁUSULA AQUI</item>
+
 Regras:
-- Retorne SOMENTE o JSON, sem markdown ao redor.
-- Para cada cláusula, copie o texto completo como aparece no documento, corrigindo OCR.
-- Se uma cláusula não for encontrada, use o valor: "Cláusula não localizada no documento."
-
-🚨 REGRA CRÍTICA DE JSON: Qualquer quebra de linha DEVE ser escapada como \\n.
-   Qualquer aspa dupla DEVE ser escapada como \\".
-
-Formato obrigatório:
-{{
-  "Cláusula 3.10": "texto integral da cláusula...",
-  "Cláusula 5.1": "texto integral da cláusula..."
-}}
+- Use exatamente o mesmo identificador recebido no campo id= (ex: "Cláusula 3.10").
+- Copie o texto completo da cláusula, corrigindo erros de OCR.
+- Se uma cláusula não for encontrada, use: <item id="Cláusula X.Y">Cláusula não localizada no documento.</item>
+- Não adicione nenhum texto fora das tags <item>.
 """
 
 
@@ -216,8 +213,10 @@ def _extrair_clausulas_referenciadas(
     pdf_bytes: bytes, clausulas: list[str]
 ) -> dict[str, str]:
     """
-    Passo 3: chama o Gemini enviando o PDF e pedindo apenas os textos
-    das cláusulas identificadas no Passo 2.
+    Passo 3: chama o Gemini pedindo os textos das cláusulas em formato XML/tags.
+
+    Usa tags <item id="...">...</item> em vez de JSON para suportar textos
+    jurídicos longos sem risco de estouro por delimitadores mal escapados.
     """
     lista_str = ", ".join(clausulas)
     prompt = PROMPT_CLAUSULAS_TEMPLATE.format(lista_clausulas=lista_str)
@@ -225,20 +224,29 @@ def _extrair_clausulas_referenciadas(
     model = genai.GenerativeModel("gemini-2.5-flash-lite")
     resposta = model.generate_content(
         [{"mime_type": "application/pdf", "data": pdf_bytes}, prompt],
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.0,
-        ),
+        generation_config=genai.GenerationConfig(temperature=0.0),
     )
 
-    texto_limpo = _sanitizar_json(resposta.text or "")
-    try:
-        return json.loads(texto_limpo, strict=False)
-    except json.JSONDecodeError as exc:
+    texto_resposta = resposta.text or ""
+    clausulas_extraidas: dict[str, str] = {}
+
+    matches = re.finditer(
+        r'<item\s+id="(.*?)">(.*?)</item>',
+        texto_resposta,
+        re.DOTALL | re.IGNORECASE,
+    )
+    for match in matches:
+        chave = match.group(1).strip()
+        valor = match.group(2).strip()
+        clausulas_extraidas[chave] = valor
+
+    if not clausulas_extraidas:
         logger.warning(
-            "Passo 3: JSON das cláusulas inválido, retornando vazio. Erro: %s", exc
+            "Passo 3: nenhuma tag <item> encontrada na resposta. "
+            "Trecho: %s", texto_resposta[:300]
         )
-        return {}
+
+    return clausulas_extraidas
 
 
 def _enriquecer_termos_definidos(
