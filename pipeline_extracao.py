@@ -2,7 +2,11 @@
 Pipeline de extração de dados de Termos de Securitização de CRIs.
 
 Fluxo:
-  Google Drive → download PDF → Gemini (inline) → extração JSON estruturada
+  Google Drive → download PDF → Two-Pass Gemini Architecture
+    Passo 1: extração base (Termos + Cronograma)
+    Passo 2: mapeamento de referências cruzadas via Python/Regex
+    Passo 3: segunda chamada Gemini para extrair textos das cláusulas referenciadas
+    Passo 4: enriquecimento dos Termos Definidos via Python
   → embeddings → persistência no Supabase → limpeza local
 """
 
@@ -10,6 +14,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from datetime import date
 from decimal import Decimal
@@ -38,6 +43,7 @@ CLAUSULAS_KEYS = [
     "cronograma_pagamentos",
 ]
 
+# Passo 1: extração base — sem instrução de cross-reference (Python resolve)
 PROMPT_EXTRACAO = """\
 Você é um especialista em instrumentos financeiros brasileiros de renda fixa, com profundo \
 conhecimento em Certificados de Recebíveis Imobiliários (CRIs).
@@ -62,36 +68,34 @@ documento original.
 
 3. PROIBIÇÃO ABSOLUTA para a cláusula "termos_definidos":
    - É PROIBIDO retornar texto corrido neste campo.
-   - O valor DEVE ser uma tabela Markdown com quebras de linha reais (\\n), neste formato exato:
+   - O valor DEVE ser uma tabela Markdown com quebras de linha escapadas (\\n), neste formato:
      | Termo | Descrição |\\n|---|---|\\n| Termo 1 | Descrição 1 |\\n| Termo 2 | Descrição 2 |
    - Corrija todos os erros de OCR nos termos e nas descrições antes de montar a tabela.
+   - Se um termo remeter a outra cláusula (ex: "Tem o significado previsto na Cláusula 3.10"),
+     mantenha essa referência intacta no texto — ela será resolvida em etapa posterior.
    - Se a seção não for encontrada, retorne apenas: | Termo | Descrição |\\n|---|---|
 
-4. BUSCA ATIVA OBRIGATÓRIA — CROSS-REFERENCE (TOLERÂNCIA ZERO A REFERÊNCIAS CEGAS):
-   - Para TODO termo definido que fizer remissão a outra cláusula do documento
-     (ex: "Cláusula 3.10", "Cláusula 3.13", "item 5.2", etc.) você deve atuar como
-     um AGENTE DE BUSCA.
-   - É EXPRESSAMENTE PROIBIDO devolver a resposta contendo apenas frases como:
-     "Tem o significado previsto na Cláusula X" — sem o conteúdo real da cláusula.
-   - Ao encontrar essa situação, VOCÊ É OBRIGADO a:
-     1. Interromper temporariamente a extração do termo atual.
-     2. Varrer o texto completo do documento até localizar a "Cláusula X" referenciada.
-     3. Extrair o seu significado ou texto real.
-     4. Injetar na tabela usando o formato exigido abaixo.
-   - FORMATO EXIGIDO:
-     Tem o significado previsto na Cláusula X: [TEXTO REAL DA CLÁUSULA ENCONTRADA NO DOCUMENTO]
-   - Referências cegas (sem o conteúdo resolvido) invalidarão a extração inteira.
-   - Se após varrer o documento a cláusula referenciada genuinamente não for encontrada,
-     escreva: Cláusula X não localizada no documento.
-
-5. CRONOGRAMA DE PAGAMENTOS — EXTRAÇÃO COMPLETA DE TODAS AS SÉRIES:
+4. CRONOGRAMA DE PAGAMENTOS — EXTRAÇÃO COMPLETA DE TODAS AS SÉRIES:
    - ATENÇÃO: Este documento pode conter múltiplas séries de CRI (ex: 178ª e 179ª Séries).
-   - Você é OBRIGADO a localizar e extrair o cronograma de pagamentos de TODAS as séries
-     presentes no documento. Não pare na primeira série encontrada.
-   - Formate a resposta estruturando cada série com um cabeçalho Markdown seguido da sua
-     respectiva tabela, usando \\n entre as linhas. Exemplo obrigatório:
+   - Você é OBRIGADO a localizar e extrair o cronograma de TODAS as séries. Não pare na primeira.
+   - Formate com cabeçalho Markdown por série e \\n entre linhas. Exemplo:
      ### Cronograma — 178ª Série\\n| Data | Amortização | Juros | Total |\\n|---|---|---|---|\\n| ... |\\n\\n### Cronograma — 179ª Série\\n| Data | Amortização | Juros | Total |\\n|---|---|---|---|\\n| ... |
    - Se não encontrar nenhum cronograma, retorne: "Cronograma não localizado no documento."
+
+================================================================================
+🚨 REGRA CRÍTICA DE JSON — VIOLAÇÃO DESTA REGRA INUTILIZA TODO O RESULTADO
+================================================================================
+
+A sua resposta deve ser um JSON válido e perfeitamente parseável por json.loads().
+- É ESTRITAMENTE PROIBIDO inserir quebras de linha LITERAIS dentro dos valores de texto.
+  Qualquer quebra de linha DEVE ser escapada como \\n.
+- Qualquer aspa dupla dentro de um valor DEVE ser escapada como \\".
+- Retorne APENAS o JSON puro, sem bloco de código markdown ao redor (sem ```json).
+
+Exemplo CORRETO  → "termos_definidos": "| Termo | Descrição |\\n|---|---|\\n| A | B |"
+Exemplo ERRADO   → "termos_definidos": "| Termo | Descrição |
+                                        |---|---|
+                                        | A | B |"
 
 ================================================================================
 
@@ -102,24 +106,6 @@ REGRAS OBRIGATÓRIAS:
 4. Datas devem estar no formato YYYY-MM-DD.
 5. taxa_spread deve ser o valor decimal puro (ex.: 2.5 para "2,5% a.a.").
 6. Se houver múltiplas séries, liste todas no array "series".
-
-================================================================================
-🚨 REGRA CRÍTICA DE JSON — VIOLAÇÃO DESTA REGRA INUTILIZA TODO O RESULTADO
-================================================================================
-
-A sua resposta deve ser um JSON válido e perfeitamente parseável por json.loads().
-- É ESTRITAMENTE PROIBIDO inserir quebras de linha LITERAIS (reais) dentro dos valores
-  de texto. Qualquer quebra de linha — incluindo as de tabelas Markdown — DEVE ser
-  obrigatoriamente escapada como \\n (barra-n).
-- Qualquer aspa dupla dentro de um valor de texto DEVE ser escapada como \\".
-- Retorne APENAS o JSON puro, sem bloco de código markdown ao redor (sem ```json).
-
-Exemplo CORRETO  → "termos_definidos": "| Termo | Descrição |\\n|---|---|\\n| A | B |"
-Exemplo ERRADO   → "termos_definidos": "| Termo | Descrição |
-                                        |---|---|
-                                        | A | B |"
-
-================================================================================
 
 Schema esperado:
 {
@@ -148,6 +134,27 @@ Schema esperado:
 }
 """
 
+# Passo 3: prompt focado na extração das cláusulas referenciadas
+PROMPT_CLAUSULAS_TEMPLATE = """\
+O documento em anexo é um Termo de Securitização de CRI (contrato financeiro em português).
+
+Extraia o texto integral ESTRITAMENTE das seguintes cláusulas: {lista_clausulas}
+
+Regras:
+- Retorne SOMENTE o JSON, sem markdown ao redor.
+- Para cada cláusula, copie o texto completo como aparece no documento, corrigindo OCR.
+- Se uma cláusula não for encontrada, use o valor: "Cláusula não localizada no documento."
+
+🚨 REGRA CRÍTICA DE JSON: Qualquer quebra de linha DEVE ser escapada como \\n.
+   Qualquer aspa dupla DEVE ser escapada como \\".
+
+Formato obrigatório:
+{{
+  "Cláusula 3.10": "texto integral da cláusula...",
+  "Cláusula 5.1": "texto integral da cláusula..."
+}}
+"""
+
 
 # ---------------------------------------------------------------------------
 # Configuração e autenticação
@@ -165,65 +172,183 @@ def _configurar_gemini() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Extração estruturada (PDF inline — sem File API)
+# Two-Pass Architecture — funções auxiliares
 # ---------------------------------------------------------------------------
 
 
-def _extrair_dados_gemini(caminho_pdf: str) -> dict:
-    """
-    Lê o PDF localmente e envia inline para o gemini-2.5-flash-lite.
-
-    Evita a File API (que exige permissões adicionais na chave).
-    Limite prático: PDFs até ~20 MB.
-    """
-    logger.info("Lendo PDF para envio inline ao Gemini: '%s'...", caminho_pdf)
-    pdf_bytes = Path(caminho_pdf).read_bytes()
-    tamanho_mb = len(pdf_bytes) / 1_048_576
-    logger.info("PDF carregado (%.1f MB). Solicitando extração estruturada...", tamanho_mb)
-
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
-
-    resposta = model.generate_content(
-        [{"mime_type": "application/pdf", "data": pdf_bytes}, PROMPT_EXTRACAO],
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.0,  # máximo determinismo para extração factual
-        ),
-    )
-
-    texto_bruto = resposta.text or ""
-
-    # Sanitização 1: remove blocos de código markdown que o modelo pode inserir
-    texto_limpo = (
+def _sanitizar_json(texto_bruto: str) -> str:
+    """Remove wrappers markdown e extrai a substring {…} do texto bruto."""
+    texto = (
         texto_bruto.strip()
         .removeprefix("```json")
         .removeprefix("```")
         .removesuffix("```")
         .strip()
     )
-
-    # Sanitização 2: localiza a substring JSON (do primeiro { ao último })
-    inicio = texto_limpo.find("{")
-    fim = texto_limpo.rfind("}")
+    inicio = texto.find("{")
+    fim = texto.rfind("}")
     if inicio != -1 and fim != -1:
-        texto_limpo = texto_limpo[inicio : fim + 1]
+        return texto[inicio : fim + 1]
+    return texto
 
+
+def _mapear_referencias_cruzadas(termos_texto: str) -> list[str]:
+    """
+    Usa regex para encontrar referências a cláusulas no texto de Termos Definidos.
+    Retorna lista de referências únicas preservando a primeira ocorrência.
+    """
+    if not termos_texto:
+        return []
+    matches = re.findall(r"[Cc]l[aá]usula\s+\d+(?:\.\d+)*", termos_texto)
+    seen: set[str] = set()
+    unicas: list[str] = []
+    for m in matches:
+        # normaliza capitalização para deduplicação
+        chave = m.strip().lower()
+        if chave not in seen:
+            seen.add(chave)
+            # preserva capitalização original da primeira ocorrência
+            unicas.append(m.strip())
+    return unicas
+
+
+def _extrair_clausulas_referenciadas(
+    pdf_bytes: bytes, clausulas: list[str]
+) -> dict[str, str]:
+    """
+    Passo 3: chama o Gemini enviando o PDF e pedindo apenas os textos
+    das cláusulas identificadas no Passo 2.
+    """
+    lista_str = ", ".join(clausulas)
+    prompt = PROMPT_CLAUSULAS_TEMPLATE.format(lista_clausulas=lista_str)
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    resposta = model.generate_content(
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, prompt],
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.0,
+        ),
+    )
+
+    texto_limpo = _sanitizar_json(resposta.text or "")
     try:
-        # strict=False aceita caracteres de controle não escapados (ex: \n literal)
-        # como último recurso, evitando falha total na extração
+        return json.loads(texto_limpo, strict=False)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "Passo 3: JSON das cláusulas inválido, retornando vazio. Erro: %s", exc
+        )
+        return {}
+
+
+def _enriquecer_termos_definidos(
+    termos_texto: str, clausulas_map: dict[str, str]
+) -> str:
+    """
+    Passo 4: para cada referência encontrada no termos_texto, substitui
+    'Cláusula X' por 'Cláusula X: [Texto: <conteúdo>]'.
+    Usa lookup case-insensitive para tolerar variações de capitalização.
+    """
+    if not clausulas_map:
+        return termos_texto
+
+    # Índice normalizado para lookup rápido
+    indice = {k.strip().lower(): v for k, v in clausulas_map.items()}
+
+    def substituir(match: re.Match) -> str:
+        referencia = match.group(0)
+        texto_clausula = indice.get(referencia.strip().lower())
+        if texto_clausula and texto_clausula != "Cláusula não localizada no documento.":
+            return f"{referencia}: [Texto: {texto_clausula}]"
+        if texto_clausula == "Cláusula não localizada no documento.":
+            return f"{referencia} [não localizada no documento]"
+        return referencia
+
+    return re.sub(r"[Cc]l[aá]usula\s+\d+(?:\.\d+)*", substituir, termos_texto)
+
+
+# ---------------------------------------------------------------------------
+# Extração estruturada — Two-Pass Architecture
+# ---------------------------------------------------------------------------
+
+
+def _extrair_dados_gemini(caminho_pdf: str) -> dict:
+    """
+    Executa a arquitetura de dois passes para extração robusta de dados.
+
+    Passo 1 — Extração base via Gemini (Termos + Cronograma).
+    Passo 2 — Python/Regex mapeia referências cruzadas nos Termos Definidos.
+    Passo 3 — Segunda chamada Gemini extrai textos das cláusulas referenciadas.
+    Passo 4 — Python injeta os textos resolvidos nos Termos Definidos.
+    """
+    logger.info("Lendo PDF para envio inline ao Gemini: '%s'...", caminho_pdf)
+    pdf_bytes = Path(caminho_pdf).read_bytes()
+    logger.info("PDF carregado (%.1f MB).", len(pdf_bytes) / 1_048_576)
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    gen_config = genai.GenerationConfig(
+        response_mime_type="application/json", temperature=0.0
+    )
+
+    # ── Passo 1: Extração base ──────────────────────────────────────────────
+    logger.info("[Passo 1/4] Iniciando extração base (Termos Definidos + Cronograma)...")
+    resposta = model.generate_content(
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, PROMPT_EXTRACAO],
+        generation_config=gen_config,
+    )
+
+    texto_limpo = _sanitizar_json(resposta.text or "")
+    try:
         dados = json.loads(texto_limpo, strict=False)
     except json.JSONDecodeError as exc:
-        trecho = texto_limpo[:500] if texto_limpo else "<vazio>"
-        logger.error("Resposta do Gemini não é JSON válido. Trecho: %s", trecho)
+        logger.error("Passo 1: JSON inválido. Trecho: %s", texto_limpo[:500])
         raise ValueError(f"Gemini retornou JSON inválido: {exc}") from exc
 
     n_series = len(dados.get("series", []))
-    n_clausulas = len([v for v in dados.get("clausulas", {}).values() if v])
     logger.info(
-        "Extração concluída: %d série(s), %d cláusula(s) com conteúdo.",
-        n_series,
-        n_clausulas,
+        "[Passo 1/4] Concluído: %d série(s) extraída(s).", n_series
     )
+
+    # ── Passo 2: Mapeamento de referências cruzadas via Python/Regex ────────
+    logger.info("[Passo 2/4] Mapeando referências cruzadas nos Termos Definidos...")
+    termos_texto = dados.get("clausulas", {}).get("termos_definidos", "")
+    clausulas_referenciadas = _mapear_referencias_cruzadas(termos_texto)
+
+    if not clausulas_referenciadas:
+        logger.info(
+            "[Passo 2/4] Nenhuma referência cruzada identificada. Pulando Passos 3 e 4."
+        )
+        return dados
+
+    logger.info(
+        "[Passo 2/4] Identificadas %d cláusula(s) para busca: %s",
+        len(clausulas_referenciadas),
+        clausulas_referenciadas,
+    )
+
+    # ── Passo 3: Segunda chamada ao Gemini para extrair cláusulas ───────────
+    logger.info(
+        "[Passo 3/4] Iniciando extração das %d cláusula(s) referenciada(s)...",
+        len(clausulas_referenciadas),
+    )
+    clausulas_map = _extrair_clausulas_referenciadas(pdf_bytes, clausulas_referenciadas)
+    n_encontradas = sum(
+        1 for v in clausulas_map.values()
+        if v and v != "Cláusula não localizada no documento."
+    )
+    logger.info(
+        "[Passo 3/4] Concluído: %d/%d cláusula(s) localizada(s) no documento.",
+        n_encontradas,
+        len(clausulas_referenciadas),
+    )
+
+    # ── Passo 4: Enriquecimento dos Termos Definidos via Python ─────────────
+    logger.info("[Passo 4/4] Enriquecendo Termos Definidos com textos resolvidos...")
+    dados["clausulas"]["termos_definidos"] = _enriquecer_termos_definidos(
+        termos_texto, clausulas_map
+    )
+    logger.info("[Passo 4/4] Termos Definidos enriquecidos com sucesso.")
+
     return dados
 
 
@@ -296,7 +421,6 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
     logger.info("Iniciando persistência para código IF '%s'...", codigo_if)
 
     with SessionLocal() as session:
-        # 1. CRIMetadata
         cri = CRIMetadata(
             codigo_if=codigo_if,
             securitizadora=meta.get("securitizadora") or None,
@@ -312,36 +436,26 @@ def _persistir_dados(codigo_if: str, dados: dict) -> None:
         session.flush()
         logger.debug("CRIMetadata criado com id='%s'.", cri.id)
 
-        # 2. CRISerie
         for i, serie in enumerate(series_raw, start=1):
-            obj_serie = CRISerie(
+            session.add(CRISerie(
                 cri_id=cri.id,
                 nome_serie=serie.get("nome_serie") or None,
                 data_vencimento=_parse_data(serie.get("data_vencimento")),
                 indexador=serie.get("indexador") or None,
                 taxa_spread=_parse_decimal(serie.get("taxa_spread")),
-            )
-            session.add(obj_serie)
-            logger.debug("CRISerie %d/%d adicionada: '%s'.", i, len(series_raw), obj_serie.nome_serie)
+            ))
+            logger.debug("CRISerie %d/%d adicionada.", i, len(series_raw))
 
-        # 3. CRIClausula + embeddings (apenas termos_definidos e cronograma)
         for chave in CLAUSULAS_KEYS:
             texto = clausulas_raw.get(chave) or ""
             embedding = _gerar_embedding(texto)
-
-            if embedding:
-                logger.debug("Embedding gerado para '%s' (%d dims).", chave, len(embedding))
-            else:
-                logger.debug("'%s' sem embedding (texto vazio ou erro).", chave)
-
-            session.add(
-                CRIClausula(
-                    cri_id=cri.id,
-                    tipo_clausula=chave,
-                    texto_original=texto or None,
-                    embedding=embedding,
-                )
-            )
+            session.add(CRIClausula(
+                cri_id=cri.id,
+                tipo_clausula=chave,
+                texto_original=texto or None,
+                embedding=embedding,
+            ))
+            logger.debug("CRIClausula '%s' adicionada (embedding=%s).", chave, embedding is not None)
 
         session.commit()
 
@@ -370,37 +484,30 @@ def executar_pipeline(codigo_if: str) -> None:
     caminho_pdf: str | None = None
 
     try:
-        # ── Etapa 1: Localização e download ─────────────────────────────────
-        logger.info("[1/4] Localizando PDF no Google Drive...")
+        logger.info("[1/3] Localizando e baixando PDF do Google Drive...")
         drive_service = obter_servico()
         file_id = encontrar_termo_por_codigo_if(drive_service, codigo_if)
 
         if not file_id:
             logger.error(
-                "Termo de Securitização não encontrado no Drive para '%s'. "
-                "Verifique se a pasta e o arquivo existem.",
-                codigo_if,
+                "Termo de Securitização não encontrado no Drive para '%s'.", codigo_if
             )
             return
 
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         caminho_pdf = baixar_pdf_drive(drive_service, file_id, str(TEMP_DIR))
-        logger.info("[1/4] PDF disponível em: '%s'.", caminho_pdf)
+        logger.info("[1/3] PDF disponível em: '%s'.", caminho_pdf)
 
-        # ── Etapa 2: Extração estruturada (PDF inline) ───────────────────────
-        logger.info("[2/4] Extraindo dados estruturados com gemini-2.5-flash-lite...")
+        logger.info("[2/3] Executando Two-Pass Architecture com Gemini...")
         dados = _extrair_dados_gemini(caminho_pdf)
 
-        # ── Etapas 3 + 4: Embeddings + persistência ──────────────────────────
-        logger.info("[3-4/4] Gerando embeddings e persistindo no Supabase...")
+        logger.info("[3/3] Gerando embeddings e persistindo no Supabase...")
         _persistir_dados(codigo_if, dados)
 
         logger.info("╚══ Pipeline concluído com sucesso para '%s'. ══╝", codigo_if)
 
     except Exception as exc:
-        logger.exception(
-            "Erro irrecuperável no pipeline para '%s': %s", codigo_if, exc
-        )
+        logger.exception("Erro irrecuperável no pipeline para '%s': %s", codigo_if, exc)
         raise
 
     finally:
@@ -423,7 +530,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=(
             "Extrai dados de um Termo de Securitização de CRI do Google Drive, "
-            "processa com Gemini e persiste no Supabase."
+            "processa com Gemini (Two-Pass) e persiste no Supabase."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Exemplo: python pipeline_extracao.py 19K1139273",
