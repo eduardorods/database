@@ -60,15 +60,17 @@ REGRAS OBRIGATÓRIAS:
 6. Para o bloco "clausulas", transcreva o texto LITERAL do documento; não resuma nem parafraseie.
 7. cronograma_pagamentos deve ser formatado como tabela Markdown (| col | col |).
 8. Se houver múltiplas séries, liste todas no array "series".
-9. REGRA ESPECIAL para "termos_definidos":
-   - NÃO retorne o texto corrido do documento.
-   - INTERPRETE o conteúdo da seção de definições, corrigindo erros visuais de OCR
+9. REGRA ESPECIAL — "termos_definidos" (cumprimento OBRIGATÓRIO):
+   - É PROIBIDO retornar texto corrido para este campo.
+   - INTERPRETE o conteúdo da seção de definições e corrija TODOS os erros de OCR
      (palavras grudadas, caracteres estranhos como \c, ^, símbolos fora de contexto).
-   - Estruture o resultado OBRIGATORIAMENTE como uma tabela Markdown de duas colunas:
-     | Termo | Descrição |
-     |---|---|
-     | <nome do termo> | <definição corrigida e clara> |
+   - O valor de "termos_definidos" DEVE ser uma tabela Markdown pura com exatamente
+     duas colunas: | Termo | Descrição |
+   - Use quebras de linha explícitas (\n) entre cada linha da tabela. O formato
+     obrigatório é:
+     "| Termo | Descrição |\n|---|---|\n| Termo 1 | Definição 1 |\n| Termo 2 | Definição 2 |"
    - Inclua TODOS os termos definidos encontrados no documento, sem omitir nenhum.
+   - Se não encontrar a seção, retorne apenas o cabeçalho: "| Termo | Descrição |\n|---|---|"
 
 Schema esperado:
 {

@@ -227,7 +227,7 @@ def _render_clausulas(cri_id) -> None:
         with aba:
             texto = clausulas.get(chave, "")
             if texto.strip():
-                st.markdown(texto)
+                st.markdown(texto.replace('\\n', '\n'), unsafe_allow_html=True)
             else:
                 st.caption("Cláusula não encontrada no documento.")
 
