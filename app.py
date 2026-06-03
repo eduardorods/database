@@ -114,7 +114,10 @@ hr { margin: 0.5rem 0 !important; border-color: #e5e7eb !important; }
 def _buscar_cri(codigo_if: str) -> CRIMetadata | None:
     with SessionLocal() as session:
         resultado = session.execute(
-            select(CRIMetadata).where(CRIMetadata.codigo_if == codigo_if)
+            select(CRIMetadata)
+            .where(CRIMetadata.codigo_if == codigo_if)
+            .order_by(CRIMetadata.id.desc())
+            .limit(1)
         ).scalar_one_or_none()
         if resultado:
             session.expunge(resultado)
