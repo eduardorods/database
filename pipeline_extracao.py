@@ -77,6 +77,13 @@ documento original.
      mantenha essa referência intacta no texto — ela será resolvida em etapa posterior.
    - Se a seção não for encontrada, retorne apenas: | Termo | Descrição |\\n|---|---|
 
+   ⚠️ ATENÇÃO CRÍTICA — ESTRUTURA TABULAR:
+   Os Termos Definidos frequentemente NÃO estão em texto corrido. Eles podem estar formatados
+   como uma tabela de duas colunas no documento, onde a primeira coluna contém o TERMO (ex:
+   "Agente Fiduciário:", "Instituição Custodiante:") e a segunda coluna contém a DESCRIÇÃO.
+   VOCÊ DEVE identificar essa estrutura tabular e convertê-la para a tabela Markdown exigida,
+   mapeando cada linha da tabela original como uma linha | Termo | Descrição | na saída.
+
 4. CRONOGRAMA DE PAGAMENTOS — EXTRAÇÃO COMPLETA DE TODAS AS SÉRIES:
    - ATENÇÃO: Este documento pode conter múltiplas séries de CRI (ex: 178ª e 179ª Séries).
    - Você é OBRIGADO a localizar e extrair o cronograma de TODAS as séries. Não pare na primeira.
@@ -119,7 +126,10 @@ Schema esperado:
     "data_emissao": "YYYY-MM-DD",
     "frequencia_juros": "",
     "data_inicio_juros": "YYYY-MM-DD",
-    "frequencia_amortizacao": ""
+    "frequencia_amortizacao": "",
+    "lastro_operacao": "",
+    "cedente": "",
+    "devedor_principal": ""
   },
   "series": [
     {
@@ -174,6 +184,32 @@ Formato obrigatório:
   "resumo": "Resumo executivo detalhado..."
 }}
 """
+
+
+# ---------------------------------------------------------------------------
+# Passo Zero — Placeholder de integração com scraper externo
+# ---------------------------------------------------------------------------
+
+
+def _acionar_scraper_fundos_net(codigo_if: str) -> None:
+    """
+    [PASSO ZERO — PLACEHOLDER] Aciona o scraper do fundos.net para o código IF informado.
+
+    Em produção, esta função deve:
+      1. Baixar o Termo de Securitização mais recente.
+      2. Baixar Aditamentos disponíveis.
+      3. Baixar Atas de Assembleia disponíveis.
+      4. Baixar o Informe Mensal mais recente.
+      5. Salvar todos os arquivos na pasta correspondente do Google Drive.
+    """
+    logger.info("━" * 64)
+    logger.info("[PASSO ZERO] Acionando scraper fundos.net para '%s'...", codigo_if)
+    logger.info("  → [TODO] Baixar Termo de Securitização mais recente...")
+    logger.info("  → [TODO] Baixar Aditamentos disponíveis...")
+    logger.info("  → [TODO] Baixar Atas de Assembleia disponíveis...")
+    logger.info("  → [TODO] Baixar Informe Mensal mais recente...")
+    logger.info("  ⚠️  Scraper não implementado. Usando arquivos já presentes no Drive.")
+    logger.info("━" * 64)
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +451,82 @@ def _extrair_evento_gemini(caminho_pdf: str, tipo: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Human-in-the-Loop — Validação interativa no terminal
+# ---------------------------------------------------------------------------
+
+
+def _validar_dados_human_in_the_loop(dados: dict) -> dict:
+    """
+    Verifica anomalias no JSON extraído e solicita correção humana via terminal.
+
+    Regras:
+      1. Lastro não identificado → solicita digitação.
+      2. Spread de série < 1.0 ou ausente → pausa e confirma (possível erro IPCA).
+      3. Campos críticos de metadata ausentes → permite inserção manual.
+    """
+    meta = dados.setdefault("metadata", {})
+    series = dados.get("series", [])
+
+    print()  # linha em branco para separar do log
+
+    # ── Checagem 1: lastro_operacao ────────────────────────────────────────
+    if not meta.get("lastro_operacao"):
+        valor = input(
+            "⚠️  Lastro não identificado. "
+            "Digite o lastro da operação (ex: Debêntures, CCB, CCV): "
+        ).strip()
+        if valor:
+            meta["lastro_operacao"] = valor
+            logger.info("Lastro definido manualmente: '%s'.", valor)
+
+    # ── Checagem 2: spread por série ───────────────────────────────────────
+    for i, serie in enumerate(series, start=1):
+        spread = serie.get("taxa_spread")
+        nome = serie.get("nome_serie") or f"Série {i}"
+        spread_num = None
+        try:
+            spread_num = float(spread) if spread is not None else None
+        except (TypeError, ValueError):
+            pass
+
+        if spread_num is None or spread_num == 0.0 or spread_num < 1.0:
+            resposta = input(
+                f"⚠️  Anomalia detectada: Spread da {nome} é {spread}% "
+                f"(possível erro para IPCA+). Confirma este valor? (s/n): "
+            ).strip().lower()
+            if resposta == "n":
+                novo = input(
+                    f"   Digite o spread correto para {nome} (ex: 2.5): "
+                ).strip()
+                try:
+                    serie["taxa_spread"] = float(novo.replace(",", "."))
+                    logger.info(
+                        "Spread da %s corrigido manualmente: %s%%.", nome, novo
+                    )
+                except ValueError:
+                    logger.warning(
+                        "Valor '%s' inválido para spread. Mantendo original.", novo
+                    )
+
+    # ── Checagem 3: campos críticos ausentes ───────────────────────────────
+    campos_criticos = ["securitizadora", "devedor", "numero_emissao"]
+    faltando = [c for c in campos_criticos if not meta.get(c)]
+    if faltando:
+        print(
+            f"⚠️  Extração falhou em campos críticos: {faltando}. "
+            "Insira manualmente ou pressione Enter para pular."
+        )
+        for campo in faltando:
+            valor = input(f"   {campo}: ").strip()
+            if valor:
+                meta[campo] = int(valor) if campo == "numero_emissao" and valor.isdigit() else valor
+                logger.info("Campo '%s' preenchido manualmente: '%s'.", campo, valor)
+
+    print()  # linha em branco ao finalizar
+    return dados
+
+
+# ---------------------------------------------------------------------------
 # Persistência
 # ---------------------------------------------------------------------------
 
@@ -443,6 +555,9 @@ def _persistir_dados(codigo_if: str, dados: dict) -> uuid.UUID:
             frequencia_juros=meta.get("frequencia_juros") or None,
             data_inicio_juros=_parse_data(meta.get("data_inicio_juros")),
             frequencia_amortizacao=meta.get("frequencia_amortizacao") or None,
+            lastro_operacao=meta.get("lastro_operacao") or None,
+            cedente=meta.get("cedente") or None,
+            devedor_principal=meta.get("devedor_principal") or None,
         )
         session.add(cri)
         session.flush()
@@ -514,6 +629,9 @@ def executar_pipeline(codigo_if: str) -> None:
     documentos: dict = {"termo_principal": None, "aditamentos": [], "atas": []}
 
     try:
+        # ── Passo Zero: Scraper fundos.net (placeholder) ─────────────────────
+        _acionar_scraper_fundos_net(codigo_if)
+
         # ── Etapa 1: Download em lote do Drive ──────────────────────────────
         logger.info("[1/3] Baixando documentos do Google Drive...")
         drive_service = obter_servico()
@@ -527,6 +645,11 @@ def executar_pipeline(codigo_if: str) -> None:
         # ── Etapa 2: Two-Pass Architecture — Termo de Securitização ─────────
         logger.info("[2/3] Processando Termo de Securitização...")
         dados_ts = _extrair_dados_gemini(documentos["termo_principal"])
+
+        # ── Human-in-the-Loop: validação e correção interativa ───────────────
+        logger.info("Iniciando validação Human-in-the-Loop...")
+        dados_ts = _validar_dados_human_in_the_loop(dados_ts)
+
         cri_id = _persistir_dados(codigo_if, dados_ts)
 
         # ── Etapa 3: Extração de Eventos ────────────────────────────────────

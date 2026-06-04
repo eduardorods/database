@@ -27,6 +27,9 @@ class CRIMetadata(Base):
     frequencia_juros: Mapped[str | None] = mapped_column(String)
     data_inicio_juros: Mapped[date | None] = mapped_column(Date)
     frequencia_amortizacao: Mapped[str | None] = mapped_column(String)
+    lastro_operacao: Mapped[str | None] = mapped_column(String)
+    cedente: Mapped[str | None] = mapped_column(String)
+    devedor_principal: Mapped[str | None] = mapped_column(String)
 
     series: Mapped[list["CRISerie"]] = relationship(
         back_populates="cri", cascade="all, delete-orphan"
