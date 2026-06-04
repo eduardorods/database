@@ -186,9 +186,16 @@ O documento em anexo é um Informe Mensal de CRI (Certificado de Recebíveis Imo
 
 Leia o documento completo e extraia as informações financeiras de CADA série presente.
 
+🚨 REGRA PARA NÚMEROS — VIOLAÇÃO INUTILIZA O RESULTADO:
+Para os campos saldo_devedor, valor_integralizado e spread_atual você DEVE retornar
+EXATAMENTE um número float no formato de programação (ex: 1500000.50).
+- É ESTRITAMENTE PROIBIDO usar o símbolo R$, pontos de milhar ou vírgulas decimais.
+- Converta o formato brasileiro para float: "R$ 1.500.000,50" → 1500000.50
+- "2,5% a.a." → 2.5
+- Se o dado não existir no documento, retorne 0.0 (nunca null para esses campos).
+
 Retorne APENAS o JSON abaixo, sem ```json ao redor. Qualquer quebra de linha deve ser \\n.
-Use null para valores não encontrados. Números devem ser decimais (ex: 10500000.50 para saldo).
-spread_atual deve ser o percentual puro (ex: 2.5 para "2,5% a.a.").
+mes_referencia no formato "MM/AAAA". indexador_atual: apenas a sigla (ex: "IPCA", "CDI").
 
 {{
   "mes_referencia": "MM/AAAA",
@@ -197,7 +204,7 @@ spread_atual deve ser o percentual puro (ex: 2.5 para "2,5% a.a.").
       "serie": "nome ou número da série (ex: 1ª Série, Série Sênior)",
       "saldo_devedor": 0.0,
       "valor_integralizado": 0.0,
-      "indexador_atual": "IPCA / CDI / IGPM / prefixado",
+      "indexador_atual": "IPCA",
       "spread_atual": 0.0
     }}
   ]

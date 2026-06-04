@@ -187,6 +187,20 @@ def _buscar_informes(cri_id) -> list[dict]:
         ]
 
 
+def _fmt_brl(v: float | None) -> str:
+    """Formata float para Real brasileiro. Retorna 'Não informado' para None ou zero."""
+    if v is None or v == 0.0:
+        return "Não informado"
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _fmt_pct(v: float | None) -> str:
+    """Formata float como percentual. Retorna 'Não informado' para None ou zero."""
+    if v is None or v == 0.0:
+        return "Não informado"
+    return f"{v:.4f}%".rstrip("0").rstrip(".")
+
+
 def _render_markdown(texto: str) -> None:
     """Renderiza texto do banco garantindo que \\n escapados virem quebras reais."""
     st.markdown(texto.replace("\\n", "\n"), unsafe_allow_html=True)
@@ -264,11 +278,6 @@ def _render_series(cri_id) -> None:
         if not informes:
             st.caption("Informe Mensal não processado para este CRI.")
         else:
-            def _fmt_brl(v: float | None) -> str:
-                if v is None:
-                    return "—"
-                return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
             rows_inf = []
             for s in series_ts:
                 nome = s["Série"]
@@ -283,8 +292,8 @@ def _render_series(cri_id) -> None:
                 if inf and idx_atual and idx_atual.lower().strip() != idx_ts:
                     idx_label += " ⚠️"
 
-                spd_label = f"{spd_atual}%" if spd_atual is not None else "—"
-                if inf and spd_atual is not None and spd_ts != "—":
+                spd_label = _fmt_pct(spd_atual)
+                if inf and spd_atual and spd_ts != "—":
                     try:
                         if abs(float(spd_ts) - float(spd_atual)) > 0.01:
                             spd_label += " ⚠️"
@@ -296,10 +305,43 @@ def _render_series(cri_id) -> None:
                     "Mês Ref.": inf["mes_referencia"] if inf else "—",
                     "Saldo Devedor": _fmt_brl(inf["saldo_devedor"] if inf else None),
                     "Indexador": idx_label,
-                    "Spread (% a.a.)": spd_label,
+                    "Spread": spd_label,
                 })
             st.dataframe(rows_inf, use_container_width=True, hide_index=True)
 
+    st.divider()
+
+
+def _render_informe_mensal(cri_id) -> None:
+    st.header("Informe Mensal Mais Recente")
+    informes = _buscar_informes(cri_id)
+
+    if not informes:
+        st.caption("Informe Mensal não processado para este CRI.")
+        st.divider()
+        return
+
+    mes_ref = informes[0]["mes_referencia"] or "—"
+    st.info(f"Dados extraídos do Informe Mensal de: **{mes_ref}**")
+
+    # Mantém apenas o registro mais recente por série
+    informe_idx: dict[str, dict] = {}
+    for inf in informes:
+        k = (inf["serie"] or "").strip().lower()
+        if k not in informe_idx:
+            informe_idx[k] = inf
+
+    rows = []
+    for inf in informe_idx.values():
+        rows.append({
+            "Série": inf["serie"] or "—",
+            "Saldo Devedor": _fmt_brl(inf["saldo_devedor"]),
+            "Valor Integralizado": _fmt_brl(inf["valor_integralizado"]),
+            "Indexador": inf["indexador_atual"] or "—",
+            "Spread (% a.a.)": _fmt_pct(inf["spread_atual"]),
+        })
+
+    st.dataframe(rows, use_container_width=True, hide_index=True)
     st.divider()
 
 
@@ -372,12 +414,13 @@ def main() -> None:
         )
         return
 
-    _render_header(cri)           # título, securitizadora, lastro/cedente/devedor
-    _render_metricas(cri)         # Seção 1 — Metadados
-    _render_series(cri.id)        # Seção 2 — Séries (Emissão vs. Informe Mensal)
-    _render_termos_definidos(cri.id)   # Seção 3 — Termos Definidos
-    _render_cronogramas(cri.id)        # Seção 4 — Cronogramas
-    _render_historico_eventos(cri.id)  # Seção 5 — Histórico de Eventos
+    _render_header(cri)                # título, securitizadora, lastro/cedente/devedor
+    _render_metricas(cri)              # Seção 1 — Metadados
+    _render_series(cri.id)             # Seção 2 — Séries (Emissão vs. Informe Mensal)
+    _render_informe_mensal(cri.id)     # Seção 3 — Informe Mensal Mais Recente
+    _render_termos_definidos(cri.id)   # Seção 4 — Termos Definidos
+    _render_cronogramas(cri.id)        # Seção 5 — Cronogramas
+    _render_historico_eventos(cri.id)  # Seção 6 — Histórico de Eventos
 
 
 if __name__ == "__main__":
