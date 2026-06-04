@@ -122,6 +122,15 @@ REGRAS OBRIGATÓRIAS:
 4. Datas devem estar no formato YYYY-MM-DD.
 5. taxa_spread deve ser o valor decimal puro (ex.: 2.5 para "2,5% a.a.").
 6. Se houver múltiplas séries, liste todas no array "series".
+7. CAMPO "devedor_principal": Busque nos Termos Definidos pela entrada cujo termo seja
+   "Devedor", "Devedora" ou "Companhia" para identificar o nome da entidade devedora.
+   O gênero da palavra (Devedor/Devedora) não importa — extraia o nome da empresa ou fundo.
+   Se não encontrar nos Termos Definidos, busque na cláusula principal da operação.
+8. CAMPO "indexador" em cada série: Retorne EXATAMENTE APENAS a sigla do índice
+   (ex: "IPCA", "CDI", "TR", "IGPM", "IPCA+", "prefixado").
+   É ESTRITAMENTE PROIBIDO retornar expressões compostas como "IPCA + spread",
+   "CDI + 2,5%" ou qualquer combinação neste campo. O spread percentual vai
+   EXCLUSIVAMENTE no campo "taxa_spread".
 
 Schema esperado:
 {

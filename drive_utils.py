@@ -28,6 +28,8 @@ _SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 _PALAVRAS_CHAVE_TERMO = ("termo", "securitizacao")
 _PADROES_ADITAMENTO = ("ts_adit_",)
 _PADROES_ATA = ("ata_assembleia",)
+# Qualquer PDF com estes fragmentos no nome NUNCA é o Termo principal
+_PALAVRAS_EXCLUIR_TERMO = ("informe", "ata", "adit")
 
 
 def _normalizar(texto: str) -> str:
@@ -297,11 +299,14 @@ def _classificar_pdfs(pdfs: list[dict]) -> dict:
             atas.append(pdf)
         elif any(p in nome_norm for p in _PADROES_ADITAMENTO):
             aditamentos.append(pdf)
+        elif any(exc in nome_norm for exc in _PALAVRAS_EXCLUIR_TERMO):
+            # informe_mensal, atas avulsas, aditamentos sem padrão exato → nunca são o TS
+            logger.debug("PDF ignorado como Termo (contém palavra excluída): '%s'.", pdf["name"])
         elif any(kw in nome_norm for kw in _PALAVRAS_CHAVE_TERMO):
             if termo is None:
                 termo = pdf
         else:
-            # PDF sem padrão reconhecido: candidato a termo principal se não houver outro
+            # PDF sem padrão reconhecido e sem exclusão: candidato a TS se não houver outro
             if termo is None:
                 termo = pdf
 

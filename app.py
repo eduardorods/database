@@ -217,6 +217,7 @@ def _render_header(cri: CRIMetadata) -> None:
 
 
 def _render_metricas(cri: CRIMetadata) -> None:
+    st.header("Metadados")
     col1, col2, col3 = st.columns(3)
     col4, col5, col6 = st.columns(3)
 
@@ -236,7 +237,7 @@ def _render_metricas(cri: CRIMetadata) -> None:
 
 
 def _render_series(cri_id) -> None:
-    st.subheader("Séries")
+    st.header("Séries")
     series_ts = _buscar_series(cri_id)
     informes = _buscar_informes(cri_id)
 
@@ -303,7 +304,7 @@ def _render_series(cri_id) -> None:
 
 
 def _render_termos_definidos(cri_id) -> None:
-    st.subheader("Termos Definidos")
+    st.header("Termos Definidos")
     texto = _buscar_clausula(cri_id, "termos_definidos")
     if texto.strip():
         _render_markdown(texto)
@@ -313,27 +314,30 @@ def _render_termos_definidos(cri_id) -> None:
 
 
 def _render_cronogramas(cri_id) -> None:
-    st.subheader("Cronogramas de Pagamento")
+    st.header("Cronogramas de Pagamento")
     texto = _buscar_clausula(cri_id, "cronograma_pagamentos")
     if texto.strip():
         _render_markdown(texto)
     else:
         st.caption("Cronograma não extraído para este CRI.")
+    st.divider()
 
 
-def _render_eventos(cri_id, tipo: str, titulo: str) -> None:
-    st.header(titulo)
-    eventos = _buscar_eventos(cri_id, tipo)
-    if not eventos:
-        st.caption(f"Nenhum(a) {titulo.lower()} encontrado(a) para este CRI.")
-        return
-    for evento in eventos:
-        label = f"{evento.data_evento or 'Data não identificada'} — {evento.nome_arquivo or ''}"
-        with st.expander(label):
-            if evento.resumo:
-                st.markdown(evento.resumo.replace("\\n", "\n"), unsafe_allow_html=True)
-            else:
-                st.caption("Resumo não disponível.")
+def _render_historico_eventos(cri_id) -> None:
+    st.header("Histórico de Eventos")
+    for tipo, titulo in [("ADITAMENTO", "Aditamentos"), ("ATA", "Atas de Assembleia")]:
+        st.subheader(titulo)
+        eventos = _buscar_eventos(cri_id, tipo)
+        if not eventos:
+            st.caption(f"Nenhum(a) {titulo.lower()} encontrado(a) para este CRI.")
+        else:
+            for evento in eventos:
+                label = f"{evento.data_evento or 'Data não identificada'} — {evento.nome_arquivo or ''}"
+                with st.expander(label):
+                    if evento.resumo:
+                        st.markdown(evento.resumo.replace("\\n", "\n"), unsafe_allow_html=True)
+                    else:
+                        st.caption("Resumo não disponível.")
 
 
 # ---------------------------------------------------------------------------
@@ -368,13 +372,12 @@ def main() -> None:
         )
         return
 
-    _render_header(cri)
-    _render_metricas(cri)
-    _render_series(cri.id)
-    _render_termos_definidos(cri.id)
-    _render_cronogramas(cri.id)
-    _render_eventos(cri.id, "ADITAMENTO", "Aditamentos")
-    _render_eventos(cri.id, "ATA", "Atas de Assembleia")
+    _render_header(cri)           # título, securitizadora, lastro/cedente/devedor
+    _render_metricas(cri)         # Seção 1 — Metadados
+    _render_series(cri.id)        # Seção 2 — Séries (Emissão vs. Informe Mensal)
+    _render_termos_definidos(cri.id)   # Seção 3 — Termos Definidos
+    _render_cronogramas(cri.id)        # Seção 4 — Cronogramas
+    _render_historico_eventos(cri.id)  # Seção 5 — Histórico de Eventos
 
 
 if __name__ == "__main__":
