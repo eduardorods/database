@@ -253,62 +253,14 @@ def _render_metricas(cri: CRIMetadata) -> None:
 def _render_series(cri_id) -> None:
     st.header("Séries")
     series_ts = _buscar_series(cri_id)
-    informes = _buscar_informes(cri_id)
 
     if not series_ts:
         st.info("Nenhuma série encontrada para este CRI.")
         st.divider()
         return
 
-    # Índice pelo nome da série — mantém apenas o registro mais recente (já vem desc)
-    informe_idx: dict[str, dict] = {}
-    for inf in informes:
-        k = (inf["serie"] or "").strip().lower()
-        if k not in informe_idx:
-            informe_idx[k] = inf
-
-    col_ts, col_inf = st.columns(2)
-
-    with col_ts:
-        st.caption("**Dados de Emissão (Termo de Securitização)**")
-        st.dataframe(series_ts, use_container_width=True, hide_index=True)
-
-    with col_inf:
-        st.caption("**Dados Atuais (Informe Mensal)**")
-        if not informes:
-            st.caption("Informe Mensal não processado para este CRI.")
-        else:
-            rows_inf = []
-            for s in series_ts:
-                nome = s["Série"]
-                inf = informe_idx.get((nome or "").strip().lower())
-
-                idx_ts = (s["Indexador"] or "").lower().strip()
-                spd_ts = s["Taxa / Spread (% a.a.)"]
-                idx_atual = inf["indexador_atual"] if inf else None
-                spd_atual = inf["spread_atual"] if inf else None
-
-                idx_label = idx_atual or "—"
-                if inf and idx_atual and idx_atual.lower().strip() != idx_ts:
-                    idx_label += " ⚠️"
-
-                spd_label = _fmt_pct(spd_atual)
-                if inf and spd_atual and spd_ts != "—":
-                    try:
-                        if abs(float(spd_ts) - float(spd_atual)) > 0.01:
-                            spd_label += " ⚠️"
-                    except (TypeError, ValueError):
-                        pass
-
-                rows_inf.append({
-                    "Série": nome,
-                    "Mês Ref.": inf["mes_referencia"] if inf else "—",
-                    "Saldo Devedor": _fmt_brl(inf["saldo_devedor"] if inf else None),
-                    "Indexador": idx_label,
-                    "Spread": spd_label,
-                })
-            st.dataframe(rows_inf, use_container_width=True, hide_index=True)
-
+    st.caption("**Dados de Emissão (Termo de Securitização)**")
+    st.dataframe(series_ts, use_container_width=True, hide_index=True)
     st.divider()
 
 
