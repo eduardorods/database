@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from sqlalchemy import select
 
 from database import SessionLocal
-from models import CRIClausula, CRIEvento, CRIMetadata, CRISerie
+from models import CRIClausula, CRIEvento, CRIInformeMensal, CRIMetadata, CRISerie
 
 load_dotenv()
 
@@ -167,6 +167,26 @@ def _buscar_eventos(cri_id, tipo: str) -> list:
         return filtrados
 
 
+def _buscar_informes(cri_id) -> list[dict]:
+    with SessionLocal() as session:
+        rows = session.execute(
+            select(CRIInformeMensal)
+            .where(CRIInformeMensal.cri_id == cri_id)
+            .order_by(CRIInformeMensal.mes_referencia.desc())
+        ).scalars().all()
+        return [
+            {
+                "mes_referencia": r.mes_referencia,
+                "serie": r.serie,
+                "saldo_devedor": r.saldo_devedor,
+                "valor_integralizado": r.valor_integralizado,
+                "indexador_atual": r.indexador_atual,
+                "spread_atual": r.spread_atual,
+            }
+            for r in rows
+        ]
+
+
 def _render_markdown(texto: str) -> None:
     """Renderiza texto do banco garantindo que \\n escapados virem quebras reais."""
     st.markdown(texto.replace("\\n", "\n"), unsafe_allow_html=True)
@@ -182,6 +202,17 @@ def _render_header(cri: CRIMetadata) -> None:
     securitizadora = cri.securitizadora or "Securitizadora não informada"
     st.title(f"{emissao} · {securitizadora}")
     st.caption(f"Código IF: `{cri.codigo_if}`")
+
+    partes = []
+    if cri.lastro_operacao:
+        partes.append(f"**Lastro:** {cri.lastro_operacao}")
+    if cri.cedente:
+        partes.append(f"**Cedente:** {cri.cedente}")
+    if cri.devedor_principal:
+        partes.append(f"**Devedor Principal:** {cri.devedor_principal}")
+    if partes:
+        st.caption("  ·  ".join(partes))
+
     st.divider()
 
 
@@ -206,11 +237,68 @@ def _render_metricas(cri: CRIMetadata) -> None:
 
 def _render_series(cri_id) -> None:
     st.subheader("Séries")
-    series = _buscar_series(cri_id)
-    if series:
-        st.dataframe(series, use_container_width=True, hide_index=True)
-    else:
+    series_ts = _buscar_series(cri_id)
+    informes = _buscar_informes(cri_id)
+
+    if not series_ts:
         st.info("Nenhuma série encontrada para este CRI.")
+        st.divider()
+        return
+
+    # Índice pelo nome da série — mantém apenas o registro mais recente (já vem desc)
+    informe_idx: dict[str, dict] = {}
+    for inf in informes:
+        k = (inf["serie"] or "").strip().lower()
+        if k not in informe_idx:
+            informe_idx[k] = inf
+
+    col_ts, col_inf = st.columns(2)
+
+    with col_ts:
+        st.caption("**Dados de Emissão (Termo de Securitização)**")
+        st.dataframe(series_ts, use_container_width=True, hide_index=True)
+
+    with col_inf:
+        st.caption("**Dados Atuais (Informe Mensal)**")
+        if not informes:
+            st.caption("Informe Mensal não processado para este CRI.")
+        else:
+            def _fmt_brl(v: float | None) -> str:
+                if v is None:
+                    return "—"
+                return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+            rows_inf = []
+            for s in series_ts:
+                nome = s["Série"]
+                inf = informe_idx.get((nome or "").strip().lower())
+
+                idx_ts = (s["Indexador"] or "").lower().strip()
+                spd_ts = s["Taxa / Spread (% a.a.)"]
+                idx_atual = inf["indexador_atual"] if inf else None
+                spd_atual = inf["spread_atual"] if inf else None
+
+                idx_label = idx_atual or "—"
+                if inf and idx_atual and idx_atual.lower().strip() != idx_ts:
+                    idx_label += " ⚠️"
+
+                spd_label = f"{spd_atual}%" if spd_atual is not None else "—"
+                if inf and spd_atual is not None and spd_ts != "—":
+                    try:
+                        if abs(float(spd_ts) - float(spd_atual)) > 0.01:
+                            spd_label += " ⚠️"
+                    except (TypeError, ValueError):
+                        pass
+
+                rows_inf.append({
+                    "Série": nome,
+                    "Mês Ref.": inf["mes_referencia"] if inf else "—",
+                    "Saldo Devedor": _fmt_brl(inf["saldo_devedor"] if inf else None),
+                    "Indexador": idx_label,
+                    "Spread (% a.a.)": spd_label,
+                })
+            st.dataframe(rows_inf, use_container_width=True, hide_index=True)
+
     st.divider()
 
 

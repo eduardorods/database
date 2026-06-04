@@ -23,8 +23,15 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 
 from database import SessionLocal
-from drive_utils import baixar_documentos_cri, obter_servico
-from models import CRIClausula, CRIEvento, CRIMetadata, CRISerie
+from drive_utils import (
+    _buscar_subpasta,
+    _listar_pdfs,
+    _normalizar,
+    baixar_documentos_cri,
+    baixar_pdf_drive,
+    obter_servico,
+)
+from models import CRIClausula, CRIEvento, CRIInformeMensal, CRIMetadata, CRISerie
 
 load_dotenv()
 
@@ -162,6 +169,30 @@ Regras:
 - Copie o texto completo da cláusula, corrigindo erros de OCR.
 - Se uma cláusula não for encontrada, use: <item id="Cláusula X.Y">Cláusula não localizada no documento.</item>
 - Não adicione nenhum texto fora das tags <item>.
+"""
+
+# Sprint 5: extração de dados financeiros do Informe Mensal
+PROMPT_INFORME_TEMPLATE = """\
+O documento em anexo é um Informe Mensal de CRI (Certificado de Recebíveis Imobiliários).
+
+Leia o documento completo e extraia as informações financeiras de CADA série presente.
+
+Retorne APENAS o JSON abaixo, sem ```json ao redor. Qualquer quebra de linha deve ser \\n.
+Use null para valores não encontrados. Números devem ser decimais (ex: 10500000.50 para saldo).
+spread_atual deve ser o percentual puro (ex: 2.5 para "2,5% a.a.").
+
+{{
+  "mes_referencia": "MM/AAAA",
+  "series": [
+    {{
+      "serie": "nome ou número da série (ex: 1ª Série, Série Sênior)",
+      "saldo_devedor": 0.0,
+      "valor_integralizado": 0.0,
+      "indexador_atual": "IPCA / CDI / IGPM / prefixado",
+      "spread_atual": 0.0
+    }}
+  ]
+}}
 """
 
 # Sprint 4: extração de data e resumo de Aditamentos e Atas
@@ -610,6 +641,95 @@ def _persistir_evento(
 
 
 # ---------------------------------------------------------------------------
+# Sprint 5 — Informe Mensal
+# ---------------------------------------------------------------------------
+
+
+def _baixar_informe_mensal(service, codigo_if: str, diretorio_destino: str) -> str | None:
+    """Localiza e baixa o PDF do Informe Mensal mais recente da pasta do CRI no Drive."""
+    pasta_raiz_id = os.environ.get("DRIVE_FOLDER_CRIS_ID")
+    if not pasta_raiz_id:
+        raise RuntimeError("Variável de ambiente DRIVE_FOLDER_CRIS_ID não definida.")
+
+    subpasta_id = _buscar_subpasta(service, pasta_raiz_id, codigo_if)
+    if not subpasta_id:
+        return None
+
+    pdfs = _listar_pdfs(service, subpasta_id)
+    informes = [p for p in pdfs if "informe_mensal" in _normalizar(p["name"])]
+
+    if not informes:
+        logger.info("Nenhum Informe Mensal encontrado na pasta '%s'.", codigo_if)
+        return None
+
+    # Mais recente = maior nome lexicográfico (assumindo padrão com data no nome)
+    informe = sorted(informes, key=lambda p: p["name"])[-1]
+    logger.info("Informe Mensal identificado: '%s'.", informe["name"])
+
+    try:
+        return baixar_pdf_drive(service, informe["id"], diretorio_destino)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Erro ao baixar Informe Mensal: %s", exc)
+        return None
+
+
+def _extrair_informe_mensal_gemini(caminho_pdf: str) -> list[dict]:
+    """Extrai dados financeiros de cada série do Informe Mensal via Gemini."""
+    logger.info("Extraindo Informe Mensal: '%s'...", Path(caminho_pdf).name)
+    pdf_bytes = Path(caminho_pdf).read_bytes()
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    resposta = model.generate_content(
+        [{"mime_type": "application/pdf", "data": pdf_bytes}, PROMPT_INFORME_TEMPLATE],
+        generation_config=genai.GenerationConfig(
+            response_mime_type="application/json",
+            temperature=0.0,
+        ),
+    )
+
+    texto_limpo = _sanitizar_json(resposta.text or "")
+    try:
+        dados = json.loads(texto_limpo, strict=False)
+    except json.JSONDecodeError as exc:
+        logger.warning("Informe Mensal: JSON inválido (%s). Retornando vazio.", exc)
+        return []
+
+    mes_ref = dados.get("mes_referencia")
+    series = dados.get("series", [])
+    for s in series:
+        s["mes_referencia"] = mes_ref
+
+    logger.info("Informe extraído: mês=%s, %d série(s).", mes_ref, len(series))
+    return series
+
+
+def _persistir_informes(cri_id: uuid.UUID, series: list[dict]) -> None:
+    """Salva registros de CRIInformeMensal para cada série do informe."""
+    if not series:
+        return
+
+    def _to_float(v) -> float | None:
+        try:
+            return float(v) if v is not None else None
+        except (ValueError, TypeError):
+            return None
+
+    with SessionLocal() as session:
+        for s in series:
+            session.add(CRIInformeMensal(
+                cri_id=cri_id,
+                mes_referencia=s.get("mes_referencia"),
+                serie=s.get("serie"),
+                saldo_devedor=_to_float(s.get("saldo_devedor")),
+                valor_integralizado=_to_float(s.get("valor_integralizado")),
+                indexador_atual=s.get("indexador_atual"),
+                spread_atual=_to_float(s.get("spread_atual")),
+            ))
+        session.commit()
+    logger.info("CRIInformeMensal persistido: %d série(s).", len(series))
+
+
+# ---------------------------------------------------------------------------
 # Orquestrador principal
 # ---------------------------------------------------------------------------
 
@@ -627,6 +747,7 @@ def executar_pipeline(codigo_if: str) -> None:
     _configurar_gemini()
 
     documentos: dict = {"termo_principal": None, "aditamentos": [], "atas": []}
+    caminho_informe: str | None = None
 
     try:
         # ── Passo Zero: Scraper fundos.net (placeholder) ─────────────────────
@@ -654,7 +775,7 @@ def executar_pipeline(codigo_if: str) -> None:
 
         # ── Etapa 3: Extração de Eventos ────────────────────────────────────
         total_eventos = len(documentos["aditamentos"]) + len(documentos["atas"])
-        logger.info("[3/3] Processando %d evento(s) (Aditamentos + Atas)...", total_eventos)
+        logger.info("[3/4] Processando %d evento(s) (Aditamentos + Atas)...", total_eventos)
 
         for caminho in documentos["aditamentos"]:
             try:
@@ -670,6 +791,18 @@ def executar_pipeline(codigo_if: str) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Falha ao processar ata '%s': %s", caminho, exc)
 
+        # ── Etapa 4: Informe Mensal ──────────────────────────────────────────
+        logger.info("[4/4] Buscando Informe Mensal...")
+        caminho_informe = _baixar_informe_mensal(drive_service, codigo_if, str(TEMP_DIR))
+        if caminho_informe:
+            try:
+                series_informe = _extrair_informe_mensal_gemini(caminho_informe)
+                _persistir_informes(cri_id, series_informe)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Falha ao processar Informe Mensal: %s", exc)
+        else:
+            logger.info("[4/4] Informe Mensal não disponível para este CRI.")
+
         logger.info("╚══ Pipeline concluído com sucesso para '%s'. ══╝", codigo_if)
 
     except Exception as exc:
@@ -681,6 +814,8 @@ def executar_pipeline(codigo_if: str) -> None:
         todos_caminhos = [documentos["termo_principal"]] if documentos["termo_principal"] else []
         todos_caminhos += documentos.get("aditamentos", [])
         todos_caminhos += documentos.get("atas", [])
+        if caminho_informe:
+            todos_caminhos.append(caminho_informe)
         for caminho in todos_caminhos:
             try:
                 Path(caminho).unlink(missing_ok=True)
